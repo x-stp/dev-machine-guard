@@ -108,3 +108,6 @@ func (e *UserAwareExecutor) EvalSymlinks(path string) (string, error) {
 }
 func (e *UserAwareExecutor) LoggedInUser() (*user.User, error) { return e.inner.LoggedInUser() }
 func (e *UserAwareExecutor) GOOS() string                      { return e.inner.GOOS() }
+func (e *UserAwareExecutor) IsAppleCLTStub(ctx context.Context, binPath string) bool {
+	return e.inner.IsAppleCLTStub(ctx, binPath)
+}

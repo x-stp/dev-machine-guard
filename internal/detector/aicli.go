@@ -231,10 +231,11 @@ func npmShimPackageRoot(exec executor.Executor, path string) string {
 // paths preserve backslashes, Unix paths preserve forward slashes.
 //
 // Examples:
-//   /usr/local/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe
-//     -> /usr/local/lib/node_modules/@anthropic-ai/claude-code
-//   C:\Users\u\AppData\Roaming\npm\node_modules\@scope\name\cli.js
-//     -> C:\Users\u\AppData\Roaming\npm\node_modules\@scope\name
+//
+//	/usr/local/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe
+//	  -> /usr/local/lib/node_modules/@anthropic-ai/claude-code
+//	C:\Users\u\AppData\Roaming\npm\node_modules\@scope\name\cli.js
+//	  -> C:\Users\u\AppData\Roaming\npm\node_modules\@scope\name
 func nodeModulesPackageRoot(path string) string {
 	sep := pathSeparator(path)
 	norm := strings.ReplaceAll(path, "\\", "/")

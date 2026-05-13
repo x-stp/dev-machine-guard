@@ -142,12 +142,12 @@ type SystemPackage struct {
 	InstallTimeUnix int64  `json:"install_time_unix,omitempty"` // Unix epoch seconds when installed (rpm, dpkg, pacman)
 
 	// Provenance & trust signals
-	Vendor       string `json:"vendor,omitempty"`          // Distributor: rpm VENDOR, dpkg Origin
-	Maintainer   string `json:"maintainer,omitempty"`      // Packager identity: rpm PACKAGER, dpkg Maintainer, apk maintainer, pacman Packager
-	URL          string `json:"url,omitempty"`             // Upstream project URL
-	License      string `json:"license,omitempty"`         // SPDX license expression
-	Section      string `json:"section,omitempty"`         // dpkg Section category (e.g. "libs", "non-free/libs")
-	Signature    string `json:"signature,omitempty"`       // Signature info: rpm SIGPGP/RSAHEADER, pacman Validated By
+	Vendor        string `json:"vendor,omitempty"`          // Distributor: rpm VENDOR, dpkg Origin
+	Maintainer    string `json:"maintainer,omitempty"`      // Packager identity: rpm PACKAGER, dpkg Maintainer, apk maintainer, pacman Packager
+	URL           string `json:"url,omitempty"`             // Upstream project URL
+	License       string `json:"license,omitempty"`         // SPDX license expression
+	Section       string `json:"section,omitempty"`         // dpkg Section category (e.g. "libs", "non-free/libs")
+	Signature     string `json:"signature,omitempty"`       // Signature info: rpm SIGPGP/RSAHEADER, pacman Validated By
 	BuildTimeUnix int64  `json:"build_time_unix,omitempty"` // Unix epoch when package was built (rpm, apk, pacman)
 
 	// Size

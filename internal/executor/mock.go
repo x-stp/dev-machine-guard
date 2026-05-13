@@ -39,6 +39,10 @@ type Mock struct {
 
 	// Symlink stubs: path -> resolved target
 	symlinks map[string]string
+
+	// macOS Command Line Tools presence (false simulates a Mac without CLT
+	// installed, where /usr/bin/python3 etc. are install-prompt shims).
+	appleCLTInstalled bool
 }
 
 type cmdResult struct {
@@ -162,6 +166,15 @@ func (m *Mock) SetGOOS(goos string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.goos = goos
+}
+
+// SetAppleCLTInstalled controls the value returned by IsAppleCLTStub.
+// Default is false (CLT not installed → binaries in the appleCLTStubBinaries
+// allowlist are reported as stubs; other /usr/bin/ paths are unaffected).
+func (m *Mock) SetAppleCLTInstalled(installed bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.appleCLTInstalled = installed
 }
 
 // --- Executor interface ---
@@ -302,6 +315,18 @@ func (m *Mock) GOOS() string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.goos
+}
+
+func (m *Mock) IsAppleCLTStub(_ context.Context, binPath string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.goos != "darwin" {
+		return false
+	}
+	if _, ok := appleCLTStubBinaries[binPath]; !ok {
+		return false
+	}
+	return !m.appleCLTInstalled
 }
 
 // --- helpers ---
