@@ -203,31 +203,7 @@ func (s *NodeScanner) scanPnpmGlobal(ctx context.Context) (model.NodeScanResult,
 		return model.NodeScanResult{}, false
 	}
 
-	// pnpm v11 hard-fails any `-g` invocation when its user-local bin dir is
-	// not on PATH. Two execution paths to handle:
-	// - In-process (exec.Command): prepend the bin dir to this Go process's
-	//   PATH so the child inherits it.
-	// - Root → user delegation (sudo -u): inline `PATH='…':$PATH` into the
-	//   shell command itself. This works regardless of sudo's env policy
-	//   (macOS keeps PATH via env_keep; Linux strips it via secure_path),
-	//   because the env-prefix is honored by the user's shell AFTER sudo
-	//   has already done whatever it does.
-	extra := defaultPnpmBinDir(s.exec)
-	if extra != "" {
-		oldPath := os.Getenv("PATH")
-		_ = os.Setenv("PATH", extra+string(os.PathListSeparator)+oldPath)
-		defer os.Setenv("PATH", oldPath)
-	}
-
-	// For the delegation path, embed `PATH='extra':$PATH` in the command name.
-	// runCmd's delegation branch space-joins name+args into the shell command
-	// string, so the env-prefix flows through to the user's shell intact.
-	// Applied to every pnpm `-g` call, since v11 enforces the bin-dir check
-	// on each one.
 	pnpmCmd := "pnpm"
-	if s.shouldRunAsUser() && extra != "" {
-		pnpmCmd = "PATH=" + platformShellQuote(s.exec, extra) + ":$PATH pnpm"
-	}
 
 	versionOut, _, _, verErr := s.runCmd(ctx, 10*time.Second, pnpmCmd, "--version")
 	version := strings.TrimSpace(versionOut)
@@ -235,16 +211,53 @@ func (s *NodeScanner) scanPnpmGlobal(ctx context.Context) (model.NodeScanResult,
 		version = "unknown"
 	}
 
-	rootOut, _, _, _ := s.runCmd(ctx, 10*time.Second, pnpmCmd, "root", "-g")
+	rootOut, _, rootExit, _ := s.runCmd(ctx, 10*time.Second, pnpmCmd, "root", "-g")
 	globalDir := strings.TrimSpace(rootOut)
-	if globalDir == "" {
-		s.log.Warn("pnpm found but `pnpm root -g` returned empty — skipping pnpm global scan")
+
+	// fallback logic in case `pnpm root -g` returns empty
+	var extra string
+	if rootExit != 0 || globalDir == "" {
+		extra = defaultPnpmBinDir(s.exec)
+		if extra != "" {
+			oldPath := os.Getenv("PATH")
+			_ = os.Setenv("PATH", extra+string(os.PathListSeparator)+oldPath)
+			defer os.Setenv("PATH", oldPath)
+
+			// For the delegation path, embed `PATH='extra':$PATH` in the command name.
+			// runCmd's delegation branch space-joins name+args into the shell command
+			// string, so the env-prefix flows through to the user's shell intact.
+			if s.shouldRunAsUser() {
+				pnpmCmd = "PATH=" + platformShellQuote(s.exec, extra) + ":$PATH pnpm"
+			}
+
+			s.log.Debug("pnpm root -g returned empty; retrying with bin dir %q prepended to PATH", extra)
+			rootOut, _, _, _ = s.runCmd(ctx, 10*time.Second, pnpmCmd, "root", "-g")
+			globalDir = strings.TrimSpace(rootOut)
+		}
+	}
+
+	if globalDir != "" {
+		globalDir = filepath.Dir(globalDir)
+	} else if extra != "" {
+		// Both attempts failed; use the bin dir itself as last-resort
+		// ProjectPath so we still produce a result rather than dropping the
+		// scan entirely.
+		s.log.Debug("pnpm root -g still empty after PATH workaround; using defaultPnpmBinDir=%q", extra)
+		globalDir = extra
+	} else {
+		s.log.Warn("pnpm found but `pnpm root -g` returned empty and no fallback available — skipping pnpm global scan")
 		return model.NodeScanResult{}, false
 	}
-	globalDir = filepath.Dir(globalDir)
 
+	// Try with --depth=3 first for transitive coverage (works on pnpm v10).
+	// Fall back to no --depth on non-zero exit — pnpm v11 hard-fails any
+	// --depth>=1 on -g and pnpm itself recommends omitting --depth.
 	start := time.Now()
-	stdout, stderr, exitCode, err := s.runCmd(ctx, 60*time.Second, pnpmCmd, "list", "-g", "--json")
+	stdout, stderr, exitCode, err := s.runCmd(ctx, 60*time.Second, pnpmCmd, "list", "-g", "--json", "--depth=3")
+	if exitCode != 0 {
+		s.log.Debug("pnpm list -g --depth=3 failed (exit=%d) — retrying without --depth (v11 path)", exitCode)
+		stdout, stderr, exitCode, err = s.runCmd(ctx, 60*time.Second, pnpmCmd, "list", "-g", "--json")
+	}
 	duration := time.Since(start).Milliseconds()
 
 	errMsg := ""

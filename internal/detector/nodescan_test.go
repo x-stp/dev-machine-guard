@@ -121,8 +121,12 @@ func TestNodeScanner_ScanPnpmGlobal_Windows(t *testing.T) {
 	mock.SetCommand("9.1.0\n", "", 0, "pnpm", "--version")
 	// pnpm root -g returns the global node_modules dir. The code calls
 	// filepath.Dir on it. Since filepath.Dir is host-OS dependent, we use
-	// forward slashes here so the test works on macOS hosts too.
+	// forward slashes here so the test works on macOS hosts too. First
+	// attempt succeeds so the PATH workaround is skipped on this path.
 	mock.SetCommand("C:/Users/dev/AppData/Local/pnpm/global/5/node_modules\n", "", 0, "pnpm", "root", "-g")
+	// Production tries `--depth=3` first (v10 transitive), falls back to no --depth
+	// on non-zero exit (v11 path). Stub both legs so the fallback is verified.
+	mock.SetCommand("", "ERR_PNPM_GLOBAL_LS_DEPTH_NOT_SUPPORTED", 1, "pnpm", "list", "-g", "--json", "--depth=3")
 	mock.SetCommand(`{"dependencies":{"typescript":{"version":"5.4.0"}}}`, "", 0, "pnpm", "list", "-g", "--json")
 
 	scanner := newTestScanner(mock)
@@ -151,11 +155,13 @@ func TestNodeScanner_ScanPnpmGlobal_Windows(t *testing.T) {
 }
 
 // TestNodeScanner_ScanPnpmGlobal_Delegated exercises the root → user delegation
-// path (macOS-as-root or Linux-as-root with a logged-in user). Verifies that
-// the inline `PATH='…':$PATH pnpm <args>` shell prefix reaches the delegated
-// command intact. Without this prefix, pnpm v11 hard-fails each `-g` call on
-// hosts where sudo strips the caller's PATH (Linux `secure_path`, hardened
-// macOS sudoers).
+// path (macOS-as-root or Linux-as-root with a logged-in user). Verifies the
+// lazy-fallback flow:
+//   - `pnpm --version` runs plainly (doesn't need bin dir on PATH).
+//   - First `pnpm root -g` runs plainly; on failure the scanner applies the
+//     inline `PATH='…':$PATH pnpm` workaround and retries.
+//   - `pnpm list -g` then uses the same prefixed pnpmCmd, so it survives sudo's
+//     env policy (Linux `secure_path` or hardened macOS sudoers).
 func TestNodeScanner_ScanPnpmGlobal_Delegated(t *testing.T) {
 	mock := executor.NewMock()
 	mock.SetGOOS("darwin")
@@ -166,12 +172,19 @@ func TestNodeScanner_ScanPnpmGlobal_Delegated(t *testing.T) {
 	// the Mock dispatches as `bash -c "<cmd>"`.
 	mock.SetCommand("/opt/homebrew/bin/pnpm\n", "", 0, "bash", "-c", "which pnpm")
 
-	// All pnpm calls in scanPnpmGlobal are built as
-	//   PATH='<extra>':$PATH pnpm <args>
-	// then sent through runCmd → RunAsUser → bash -c "<cmd>".
+	// `pnpm --version` is called plainly (no prefix) — it doesn't need the
+	// bin dir on PATH.
+	mock.SetCommand("11.1.2\n", "", 0, "bash", "-c", "pnpm --version")
+
+	// First `pnpm root -g` attempt runs plainly; v11 errors when bin dir not on PATH.
+	mock.SetCommand("", "ERR_PNPM_GLOBAL_LS_DEPTH_NOT_SUPPORTED", 1, "bash", "-c", "pnpm root -g")
+
+	// Production then applies the workaround and retries with the inline PATH= prefix.
 	prefix := `PATH='/Users/testuser/Library/pnpm/bin':$PATH pnpm`
-	mock.SetCommand("11.1.2\n", "", 0, "bash", "-c", prefix+" --version")
 	mock.SetCommand("/Users/testuser/Library/pnpm/global/v11/node_modules\n", "", 0, "bash", "-c", prefix+" root -g")
+
+	// `pnpm list -g` tries with --depth=3 first; v11 path errors → fall back to no --depth.
+	mock.SetCommand("", "ERR_PNPM_GLOBAL_LS_DEPTH_NOT_SUPPORTED", 1, "bash", "-c", prefix+" list -g --json --depth=3")
 	mock.SetCommand(`{"dependencies":{"typescript":{"version":"5.4.0"}}}`, "", 0, "bash", "-c", prefix+" list -g --json")
 
 	log := progress.NewLogger(progress.LevelInfo)
@@ -190,13 +203,52 @@ func TestNodeScanner_ScanPnpmGlobal_Delegated(t *testing.T) {
 		t.Fatal("expected pnpm in delegated scan results")
 	}
 	if pnpm.PMVersion != "11.1.2" {
-		t.Errorf("PMVersion = %q, want 11.1.2 — PATH= prefix likely missing from `pnpm --version` invocation", pnpm.PMVersion)
+		t.Errorf("PMVersion = %q, want 11.1.2 — `pnpm --version` should run plainly without PATH prefix", pnpm.PMVersion)
 	}
 	if pnpm.ProjectPath != "/Users/testuser/Library/pnpm/global/v11" {
-		t.Errorf("ProjectPath = %q, want /Users/testuser/Library/pnpm/global/v11 — PATH= prefix likely missing from `pnpm root -g` invocation", pnpm.ProjectPath)
+		t.Errorf("ProjectPath = %q, want /Users/testuser/Library/pnpm/global/v11 — PATH= prefix likely missing from `pnpm root -g` retry", pnpm.ProjectPath)
 	}
 	if pnpm.ExitCode != 0 {
 		t.Errorf("ExitCode = %d, want 0 — PATH= prefix likely missing from `pnpm list -g` invocation", pnpm.ExitCode)
+	}
+}
+
+// TestNodeScanner_ScanPnpmGlobal_RootGFallback verifies that when BOTH
+// `pnpm root -g` attempts fail (plain + with PATH workaround), the scan does
+// not bail out — it falls back to the platform-default bin dir
+// (defaultPnpmBinDir) as ProjectPath so the result is still produced.
+func TestNodeScanner_ScanPnpmGlobal_RootGFallback(t *testing.T) {
+	mock := executor.NewMock()
+	mock.SetGOOS("darwin")
+	mock.SetEnv("HOME", "/Users/foo")
+	mock.SetPath("pnpm", "/opt/homebrew/bin/pnpm")
+	mock.SetCommand("11.1.2\n", "", 0, "pnpm", "--version")
+	// pnpm root -g errors on every attempt — both the plain first call AND
+	// the retry use the same plain `pnpm root -g` command, because
+	// shouldRunAsUser is false on this in-process path (IsRoot not set).
+	mock.SetCommand("", "ERR_PNPM_GLOBAL_LS_DEPTH_NOT_SUPPORTED", 1, "pnpm", "root", "-g")
+	mock.SetCommand("", "ERR_PNPM_GLOBAL_LS_DEPTH_NOT_SUPPORTED", 1, "pnpm", "list", "-g", "--json", "--depth=3")
+	mock.SetCommand(`{"dependencies":{"jest":{"version":"30.4.2"}}}`, "", 0, "pnpm", "list", "-g", "--json")
+
+	scanner := newTestScanner(mock)
+	results := scanner.ScanGlobalPackages(context.Background())
+
+	var pnpm *model.NodeScanResult
+	for i, r := range results {
+		if r.PackageManager == "pnpm" {
+			pnpm = &results[i]
+			break
+		}
+	}
+	if pnpm == nil {
+		t.Fatal("expected pnpm in results — fallback should have prevented an early return")
+	}
+	// ProjectPath falls back to defaultPnpmBinDir on darwin = $HOME/Library/pnpm/bin.
+	if pnpm.ProjectPath != "/Users/foo/Library/pnpm/bin" {
+		t.Errorf("ProjectPath = %q, want /Users/foo/Library/pnpm/bin (defaultPnpmBinDir fallback)", pnpm.ProjectPath)
+	}
+	if pnpm.ExitCode != 0 {
+		t.Errorf("ExitCode = %d, want 0 — `pnpm list -g` should have succeeded via the no-depth fallback", pnpm.ExitCode)
 	}
 }
 
