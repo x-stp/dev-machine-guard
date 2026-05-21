@@ -15,19 +15,21 @@ dotnet tool install --global wix --version 4.0.5
 Then from the repo root:
 
 ```bash
-# Build the Windows binaries first.
-make build-windows                            # produces stepsecurity-dev-machine-guard.exe
-
-# Build the x64 MSI.
-make build-msi-amd64                          # produces dist/stepsecurity-dev-machine-guard-x64.msi
+# Build the x64 MSI (the build-windows-amd64 .exe is built as a dependency).
+make build-msi-amd64
+# produces dist/stepsecurity-dev-machine-guard-<version>-x64.msi
 ```
 
 For arm64 (less common but supported):
 
 ```bash
-GOARCH=arm64 make build-windows
 make build-msi-arm64
+# produces dist/stepsecurity-dev-machine-guard-<version>-arm64.msi
 ```
+
+(Each MSI target has its own arch-specific `build-windows*` prerequisite — the
+top-level `build-windows` target is hardcoded amd64 only, so don't try
+`GOARCH=arm64 make build-windows`. Use the dedicated targets above.)
 
 ## What the MSI does
 

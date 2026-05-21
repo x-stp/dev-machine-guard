@@ -24,9 +24,12 @@ install/upgrade/uninstall flows **never spawn PowerShell**. The chain is:
 SCCM → msiexec.exe → stepsecurity-dev-machine-guard.exe → schtasks.exe
 ```
 
-Custom actions run inside `msiexec`'s process tree as immediate actions
-(elevated under SCCM's SYSTEM context). The binary itself uses Windows
-Task Scheduler's native CLI to register the scan job. Nothing in the
+Custom actions run inside `msiexec`'s process tree as **deferred** actions
+in SYSTEM context (`Execute="deferred" Impersonate="no"`). Deferred is
+required because immediate actions execute during MSI script-building,
+before the binary is actually on disk. They invoke our binary via
+WiX's `WixQuietExec` (from `WixToolset.Util.wixext`); the binary then
+shells out to `schtasks.exe` for task registration. Nothing in the
 install path touches `powershell.exe`.
 
 ## Two ways to pass tenant credentials
@@ -92,6 +95,35 @@ The API key never appears on the msiexec command line, so it stays out
 of `AppEnforce.log` even with verbose logging enabled. The bootstrap
 file can be ACL-restricted to SYSTEM + Administrators if you want
 defense-in-depth.
+
+### A note on the persisted `config.json` and multi-user machines
+
+Either deployment path above writes the resolved config — including
+`api_key` in plaintext — to `C:\ProgramData\StepSecurity\config.json`
+on each endpoint. This is required because the scheduled task runs
+under the **logged-in user's** context (see "Why MSI and not a script"
+above for rationale) and needs to read the config at scan time.
+
+The installer hardens the file's ACL on write to:
+
+- `NT AUTHORITY\SYSTEM` — Full Control
+- `BUILTIN\Administrators` — Full Control
+- `BUILTIN\Users` — Read
+
+Inheritance is disabled. So any logged-in user CAN read the API key
+(necessary for the scanner), but cannot modify it. On a **single-user
+developer workstation** this is the expected security posture.
+
+On a **shared multi-user machine** (e.g., a kiosk, a lab workstation,
+RDS host) this means every interactive user can read each others'
+tenant API key. If that's not acceptable for your environment:
+
+- Use the `BOOTSTRAPFILE` path and tighten the bootstrap file's ACL
+  yourself (the installer only manages `config.json`'s ACL)
+- Or scope deployment to single-user machines via SCCM collection
+  requirements
+- Or open an issue if you'd like first-class support for DPAPI-encrypted
+  storage; we'll prioritize based on demand
 
 ## SCCM Application setup, step by step
 

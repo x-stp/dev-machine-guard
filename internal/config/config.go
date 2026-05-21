@@ -360,12 +360,19 @@ func loadExisting() *ConfigFile {
 
 func save(cfg *ConfigFile) error {
 	dir := writeConfigDir()
-	// Machine-wide on Windows lives under C:\ProgramData and must remain
-	// world-readable (the scheduled task runs as a less-privileged user).
-	// Per-user keeps 0700 to stay private to the owner.
+
+	// File-mode bits below ARE meaningful on POSIX (per-user community installs
+	// on macOS/Linux); on Windows they're ignored by the OS — access is
+	// controlled exclusively by ACLs. We set the mode for POSIX correctness
+	// and harden Windows access separately via hardenMachineConfigACL below.
 	dirMode := os.FileMode(0o700)
 	fileMode := os.FileMode(0o600)
-	if isElevated() && machineConfigDir() != "" && dir == machineConfigDir() {
+	machineWide := isElevated() && machineConfigDir() != "" && dir == machineConfigDir()
+	if machineWide {
+		// Machine-wide install: the scheduled task fires under a less-privileged
+		// logged-in user account (see schtasks.go's /ru INTERACTIVE), so the
+		// file must be READABLE by that user — but should not be writable by
+		// non-admins. hardenMachineConfigACL handles the Windows-specific ACL.
 		dirMode = 0o755
 		fileMode = 0o644
 	}
@@ -378,7 +385,22 @@ func save(cfg *ConfigFile) error {
 		return err
 	}
 
-	return os.WriteFile(filepath.Join(dir, "config.json"), data, fileMode)
+	configPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(configPath, data, fileMode); err != nil {
+		return err
+	}
+
+	if machineWide {
+		// Best-effort ACL hardening. Failure does not block the install — the
+		// config is still functional, just inheriting default ProgramData ACLs.
+		// Note: api_key persists in plaintext on disk. On multi-user dev
+		// machines this is a known tradeoff, documented in deploying-via-sccm.md.
+		// Customers needing stronger isolation should use the --from-file
+		// bootstrap pattern and lock down the bootstrap file separately.
+		_ = hardenMachineConfigACL(configPath)
+	}
+
+	return nil
 }
 
 // ShowConfigure prints the current configuration to stdout.
