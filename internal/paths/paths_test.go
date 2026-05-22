@@ -2,6 +2,7 @@ package paths
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -95,7 +96,7 @@ func TestHome_ExpandsHomeTokenFromConfig(t *testing.T) {
 	if err != nil || home == "" {
 		t.Skip("home dir unresolved in this environment")
 	}
-	want := home + "/.stepsecurity"
+	want := filepath.Join(home, ".stepsecurity")
 	if got := Home(); got != want {
 		t.Errorf("Home() = %q, want %q (config $HOME should expand)", got, want)
 	}
@@ -114,7 +115,7 @@ func TestHome_ExpandsTildeFromEnvVar(t *testing.T) {
 	if err != nil || home == "" {
 		t.Skip("home dir unresolved in this environment")
 	}
-	want := home + "/agent"
+	want := filepath.Join(home, "agent")
 	if got := Home(); got != want {
 		t.Errorf("Home() = %q, want %q (env ~ should expand)", got, want)
 	}
@@ -129,7 +130,7 @@ func TestHome_ExpandsHomeFromCLIFlag(t *testing.T) {
 	if err != nil || home == "" {
 		t.Skip("home dir unresolved in this environment")
 	}
-	want := home + "/custom"
+	want := filepath.Join(home, "custom")
 	if got := Home(); got != want {
 		t.Errorf("Home() = %q, want %q (CLI $HOME should expand)", got, want)
 	}

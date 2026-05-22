@@ -16,6 +16,7 @@ package paths
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/step-security/dev-machine-guard/internal/config"
@@ -40,8 +41,16 @@ func SetOverride(s string) {
 // Home returns the resolved install dir. Falls back to LegacyHome when
 // nothing else is set. Empty string is possible only when the home
 // directory itself cannot be resolved. A leading $HOME or ~ token in
-// any source is expanded so the returned path is always canonical —
-// matches the search_dirs handling in internal/scan/scanner.go.
+// any source is expanded via expandHome so the returned path is
+// canonical for the current OS, keeping the migration warning in main
+// from misfiring on hand-edited values like "$HOME/.stepsecurity" that
+// resolve to the legacy default.
+//
+// Note: this is a superset of resolveSearchDirs in internal/scan/scanner.go,
+// which only expands the exact literal "$HOME" — the install dir comes
+// from operator-edited config so it has to tolerate the "$HOME/foo" /
+// "~/foo" forms our docs use; search_dirs come from --search-dirs flag
+// values that operators don't combine with subpaths.
 func Home() string {
 	if cliOverride != "" {
 		return expandHome(cliOverride)
@@ -77,9 +86,12 @@ func expandHome(s string) string {
 	case s == "$HOME" || s == "~":
 		return home
 	case strings.HasPrefix(s, "$HOME/") || strings.HasPrefix(s, `$HOME\`):
-		return home + s[len("$HOME"):]
+		// filepath.Join + Clean canonicalises separators so Windows
+		// gets C:\Users\me\.stepsecurity (not C:\Users\me/.stepsecurity)
+		// and the equality check against LegacyHome() can succeed.
+		return filepath.Join(home, s[len("$HOME"):])
 	case strings.HasPrefix(s, "~/") || strings.HasPrefix(s, `~\`):
-		return home + s[len("~"):]
+		return filepath.Join(home, s[len("~"):])
 	}
 	return s
 }
