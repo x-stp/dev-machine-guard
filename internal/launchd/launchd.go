@@ -139,10 +139,13 @@ func Install(exec executor.Executor, log *progress.Logger) error {
 	if !exec.IsRoot() {
 		domain = fmt.Sprintf("gui/%d", os.Getuid())
 	}
-	_, _, exitCode, err := exec.Run(ctx, "launchctl", "bootstrap", domain, plistPath)
-	log.Debug("launchctl bootstrap %q %q: exit_code=%d err=%v", domain, plistPath, exitCode, err)
-	if err != nil || exitCode != 0 {
-		return fmt.Errorf("failed to bootstrap launchd configuration")
+	_, stderr, exitCode, err := exec.Run(ctx, "launchctl", "bootstrap", domain, plistPath)
+	log.Debug("launchctl bootstrap %q %q: exit_code=%d err=%v stderr=%q", domain, plistPath, exitCode, err, stderr)
+	if err != nil {
+		return fmt.Errorf("launchctl bootstrap failed: %w", err)
+	}
+	if exitCode != 0 {
+		return fmt.Errorf("launchctl bootstrap failed (exit code %d): %s", exitCode, strings.TrimSpace(stderr))
 	}
 
 	log.Progress("launchd configuration completed successfully")
@@ -182,9 +185,16 @@ func doUninstall(ctx context.Context, exec executor.Executor, log *progress.Logg
 			domain = fmt.Sprintf("gui/%d", os.Getuid())
 		}
 		target := domain + "/" + label
-		_, _, exitCode, err := exec.Run(ctx, "launchctl", "bootout", target)
-		log.Debug("launchctl bootout %q: exit_code=%d err=%v", target, exitCode, err)
-		log.Progress("Unloaded launchd agent")
+		_, stderr, exitCode, err := exec.Run(ctx, "launchctl", "bootout", target)
+		log.Debug("launchctl bootout %q: exit_code=%d err=%v stderr=%q", target, exitCode, err, stderr)
+		switch {
+		case err != nil:
+			log.Warn("launchctl bootout failed: %v — the running service may persist until reboot; plist will still be removed", err)
+		case exitCode != 0:
+			log.Warn("launchctl bootout failed (exit code %d): %s — the running service may persist until reboot; plist will still be removed", exitCode, strings.TrimSpace(stderr))
+		default:
+			log.Progress("Unloaded launchd agent")
+		}
 	}
 
 	// Remove plist
