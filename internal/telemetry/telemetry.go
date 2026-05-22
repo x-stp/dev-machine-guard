@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -153,11 +154,76 @@ func Run(exec executor.Executor, log *progress.Logger, cfg *cli.Config) (err err
 		}
 	}
 
+	// Phase-boundary progress posts run on a dedicated worker so the scan
+	// never blocks on HTTP at a call site. Buffer=1 + drop-oldest send
+	// gives us two properties together:
+	//   - Strict ordering: a single consumer means the backend can never
+	//     see an older snapshot land after a newer one (which would cause
+	//     the console UI to briefly regress on degraded networks).
+	//   - Bounded resources: at most one pending snapshot is queued; a
+	//     slow-network backlog can't grow across the 11+ inline call
+	//     sites. The latest snapshot always wins, which matches what an
+	//     operator watching progress actually cares about.
+	//
+	// Without this, blocking phase posts could add the per-call retry
+	// budget (~6s: 2 attempts × 3s HTTP timeout + 500ms backoff) to each
+	// call site, compounding to over a minute of added scan latency on a
+	// degraded link for purely best-effort progress data.
+	phaseCh := make(chan RunStatusInfo, 1)
+	phaseDone := make(chan struct{})
+	var phaseSendMu sync.Mutex // serialises drain+send so concurrent producers (main scan + heartbeat) don't race
+	go func() {
+		defer close(phaseDone)
+		// process posts one snapshot using a Background-derived ctx with
+		// a bounded per-post timeout. We deliberately do NOT chain off the
+		// scan ctx here: the final phase-boundary post (which is the only
+		// snapshot that includes "telemetry_upload" in phases_completed)
+		// arrives at the worker *after* the function body returns and the
+		// deferred cancelRun() fires. If we shared the scan ctx, that post
+		// would always be cancelled mid-flight and the backend would never
+		// learn the upload completed. The 10s budget covers postProgress's
+		// own internal retry window (2×3s + 500ms backoff) with slack.
+		process := func(snap RunStatusInfo) {
+			postCtx, postCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer postCancel()
+			postProgress(postCtx, log, executionID, deviceID, invocationMethod, snap)
+		}
+		for {
+			select {
+			case snap := <-phaseCh:
+				process(snap)
+			case <-ctx.Done():
+				// Drain any queued snapshot before exiting. Without this,
+				// a naïve select on the next iteration would 50/50 between
+				// the ready ctx.Done() and the ready phaseCh — dropping
+				// the final post is exactly what the user reports as
+				// "telemetry_upload missing from phases_completed".
+				for {
+					select {
+					case snap := <-phaseCh:
+						process(snap)
+					default:
+						return
+					}
+				}
+			}
+		}
+	}()
+
 	// postPhase is the convergence point for phase-boundary and heartbeat
 	// progress updates. Captured here so the heartbeat goroutine and the
 	// inline phase wrappers share a single call site.
 	postPhase := func() {
-		postProgress(ctx, log, executionID, deviceID, invocationMethod, tracker.Snapshot())
+		snap := tracker.Snapshot()
+		phaseSendMu.Lock()
+		defer phaseSendMu.Unlock()
+		// Drop any queued (older) snapshot so the freshest one always lands.
+		select {
+		case <-phaseCh:
+		default:
+		}
+		// Always succeeds: buffer=1, just drained, single sender under the mutex.
+		phaseCh <- snap
 	}
 
 	// Catch SIGINT / SIGTERM so cancellation (Ctrl+C, launchd stop, kill)
@@ -278,13 +344,15 @@ func Run(exec executor.Executor, log *progress.Logger, cfg *cli.Config) (err err
 			}
 		}
 	}()
-	// Shut the heartbeat down cleanly on return. Order matters: cancel
-	// first so the goroutine sees ctx.Done() and exits, THEN wait for it
-	// to close heartbeatDone. Splitting these into two `defer` statements
-	// would deadlock — LIFO would block on the wait before cancel fires.
+	// Shut down both the heartbeat goroutine and the phase-post worker
+	// cleanly on return. Order matters: cancel first so both goroutines
+	// see ctx.Done() and exit, THEN wait for each to close its done
+	// channel. Splitting these into separate `defer` statements would
+	// deadlock — LIFO would block on the waits before cancel fires.
 	defer func() {
 		cancelRun()
 		<-heartbeatDone
+		<-phaseDone
 	}()
 
 	// Detect logged-in user for running commands as the real user when root.

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/step-security/dev-machine-guard/internal/launchd"
@@ -51,12 +52,24 @@ func TestDetectInvocationMethod_HostMachine(t *testing.T) {
 // TestDetectInvocationMethod_RespondsToFilesystem covers the darwin/linux
 // path that stats a scheduler artifact. On Windows the check shells out to
 // schtasks, which we can't safely stub without an executor seam — skip there.
+//
+// Sandboxes HOME (Unix) and USERPROFILE (Windows-safe no-op on Unix) under
+// t.TempDir() so launchd.UserPlistPath / systemd.TimerUnitPath compute paths
+// that live entirely inside the temp tree. Without this the test would write
+// markers (and MkdirAll-created parent dirs) into the developer's real
+// ~/Library/LaunchAgents or ~/.config/systemd/user — leaving stray files
+// behind on CI and risking a tiny TOCTOU window against a real install.
 func TestDetectInvocationMethod_RespondsToFilesystem(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("windows uses schtasks /query, not filesystem")
 	}
 
-	// Resolve the platform's expected artifact path.
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+	t.Setenv("USERPROFILE", tempHome) // no-op on Unix but cheap and keeps the seam consistent
+
+	// Resolve the platform's expected artifact path AFTER the env override
+	// so os.UserHomeDir() returns tempHome.
 	var path string
 	switch runtime.GOOS {
 	case "darwin":
@@ -69,24 +82,25 @@ func TestDetectInvocationMethod_RespondsToFilesystem(t *testing.T) {
 	if path == "" {
 		t.Skip("could not resolve scheduler artifact path on this host")
 	}
+	if !strings.HasPrefix(path, tempHome) {
+		t.Fatalf("resolved path %q escaped tempHome %q — env sandbox is not effective", path, tempHome)
+	}
 
-	// We don't want to clobber a real installation. If the artifact already
-	// exists, just confirm the detector agrees and bail; otherwise create a
-	// fake marker, assert detection flips, then clean up.
-	if _, err := os.Stat(path); err == nil {
-		if got := DetectInvocationMethod(); got != InvocationInstall {
-			t.Fatalf("artifact %q exists but detector returned %q", path, got)
-		}
-		return
+	// Fresh temp home — detector starts at one_time, flips to install when
+	// the marker appears, flips back when it's removed.
+	if got := DetectInvocationMethod(); got != InvocationOneTime {
+		t.Fatalf("on clean temp home, detector returned %q, want %q",
+			got, InvocationOneTime)
 	}
 
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Skipf("cannot prepare scheduler artifact dir for test: %v", err)
+		t.Fatalf("prepare scheduler artifact dir: %v", err)
 	}
 	if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
-		t.Skipf("cannot write fake scheduler artifact: %v", err)
+		t.Fatalf("write fake scheduler artifact: %v", err)
 	}
-	t.Cleanup(func() { _ = os.Remove(path) })
+	// No explicit cleanup: everything lives under t.TempDir() and is
+	// removed by the testing framework when the test ends.
 
 	if got := DetectInvocationMethod(); got != InvocationInstall {
 		t.Fatalf("after creating %q, detector returned %q, want %q",
@@ -98,8 +112,6 @@ func TestDetectInvocationMethod_RespondsToFilesystem(t *testing.T) {
 	if err := os.Remove(path); err != nil {
 		t.Fatalf("remove fake artifact: %v", err)
 	}
-	// Avoid double-remove in cleanup.
-	t.Cleanup(func() {})
 
 	if got := DetectInvocationMethod(); got != InvocationOneTime {
 		t.Fatalf("after removing %q, detector returned %q, want %q",

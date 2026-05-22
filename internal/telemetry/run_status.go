@@ -146,7 +146,12 @@ func postRunStatusWithRetry(ctx context.Context, log *progress.Logger,
 			select {
 			case <-time.After(runStatusRetryBackoff):
 			case <-ctx.Done():
-				log.Progress("run-status: parent context done, abandoning retries")
+				// Demoted to Debug: parent ctx done means clean shutdown
+				// (or operator-initiated cancel that already logged its
+				// own reason). No need to add a second progress-level
+				// noise line in the normal "scan finished successfully,
+				// last progress post got cut off by cancelRun()" flow.
+				log.Debug("run-status: parent context done, abandoning retries")
 				return
 			}
 		}
@@ -159,8 +164,21 @@ func postRunStatusWithRetry(ctx context.Context, log *progress.Logger,
 // postRunStatusOnce performs a single HTTP attempt. Returns true on a 2xx
 // or 4xx (terminal — retrying a bad request will not help). Returns false
 // on transport errors or 5xx so the caller can retry.
+//
+// Treats parent-ctx cancellation as terminal-and-quiet: the only time we
+// observe ctx.Err() != nil here is shutdown (cancelRun fired). Logging a
+// "POST error: context canceled" at progress level on every successful
+// scan — because the final phase-boundary post raced the deferred
+// cancelRun — would mislead operators into thinking the run failed.
 func postRunStatusOnce(ctx context.Context, log *progress.Logger,
 	endpoint string, body []byte, status string, attempt, maxAttempts int) bool {
+
+	// Short-circuit when the scan ctx is already done — no point opening a
+	// connection just to have it cancelled mid-handshake.
+	if ctx.Err() != nil {
+		log.Debug("run-status[%s %d/%d]: skipped (parent context done)", status, attempt, maxAttempts)
+		return true
+	}
 
 	cctx, cancel := context.WithTimeout(ctx, runStatusHTTPTimeout)
 	defer cancel()
@@ -177,6 +195,14 @@ func postRunStatusOnce(ctx context.Context, log *progress.Logger,
 	client := &http.Client{Timeout: runStatusHTTPTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
+		// Distinguish shutdown-induced cancellation from a real transport
+		// error. If the parent ctx is done, this was clean shutdown — log
+		// at debug and return terminal so the caller doesn't burn a retry
+		// on an already-cancelled context.
+		if ctx.Err() != nil {
+			log.Debug("run-status[%s %d/%d]: aborted at shutdown: %v", status, attempt, maxAttempts, err)
+			return true
+		}
 		log.Progress("run-status[%s %d/%d]: POST error: %v", status, attempt, maxAttempts, err)
 		return false
 	}
