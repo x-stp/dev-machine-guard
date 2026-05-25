@@ -3,6 +3,7 @@ package scan
 import (
 	"context"
 	"os"
+	"sort"
 	"time"
 
 	"github.com/step-security/dev-machine-guard/internal/buildinfo"
@@ -333,6 +334,7 @@ func Run(exec executor.Executor, log *progress.Logger, cfg *cli.Config) error {
 
 	log.Debug("scan complete: ais=%d ides=%d extensions=%d mcp=%d node_projects=%d brew_formulae=%d brew_casks=%d python_projects=%d",
 		len(aiTools), len(ides), len(extensions), len(mcpConfigs), len(nodeProjects), len(brewFormulae), len(brewCasks), len(pythonProjects))
+	logTCCHits(log, tccSkipper)
 
 	// Output
 	switch cfg.OutputFormat {
@@ -374,6 +376,22 @@ func resolveHome(exec executor.Executor) string {
 		return u.HomeDir
 	}
 	return ""
+}
+
+// logTCCHits surfaces which TCC-protected paths were actually encountered
+// (and short-circuited) during the scan's directory walks. Quiet when
+// nothing was matched.
+func logTCCHits(log *progress.Logger, s *tcc.Skipper) {
+	hits := s.Hits()
+	if len(hits) == 0 {
+		return
+	}
+	paths := make([]string, 0, len(hits))
+	for p := range hits {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+	log.Warn("macOS TCC: encountered and skipped %d protected path(s) during walks: %v", len(paths), paths)
 }
 
 func mergeAITools(cli, agents, frameworks []model.AITool) []model.AITool {

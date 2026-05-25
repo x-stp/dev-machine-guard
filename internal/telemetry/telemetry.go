@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -808,7 +809,24 @@ func Run(exec executor.Executor, log *progress.Logger, cfg *cli.Config) (err err
 
 	fmt.Fprintln(os.Stderr)
 	log.Progress("Telemetry collection completed successfully")
+	logTCCHits(log, tccSkipper)
 	return nil
+}
+
+// logTCCHits surfaces which TCC-protected paths were actually encountered
+// (and short-circuited) during the enterprise scan's directory walks.
+// Quiet when nothing was matched.
+func logTCCHits(log *progress.Logger, s *tcc.Skipper) {
+	hits := s.Hits()
+	if len(hits) == 0 {
+		return
+	}
+	paths := make([]string, 0, len(hits))
+	for p := range hits {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+	log.Debug("tcc: encountered and skipped %d protected path(s) during walks: %v", len(paths), paths)
 }
 
 func brewFormulaeCount(scans []model.BrewScanResult) int {
