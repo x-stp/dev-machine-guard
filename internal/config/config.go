@@ -19,7 +19,7 @@ var (
 	EnableNPMScan       *bool  // nil=auto
 	EnableBrewScan      *bool  // nil=auto
 	EnablePythonScan    *bool  // nil=auto
-	IncludeTCCProtected *bool  // nil=auto (skip when running under macOS launchd, scan otherwise)
+	IncludeTCCProtected *bool  // nil or false = skip macOS TCC-protected dirs (default); true = walk them. The scan as a whole runs in both cases; only reads inside the TCC-protected subtrees themselves (Documents, Mail, etc.) need the agent to have Full Disk Access (PPPC or manual grant) — without that, those walks return EACCES per entry while the rest of the scan completes normally. See docs/macos-tcc-permissions.md.
 	ColorMode           string // "" means auto
 	OutputFormat        string // "" means default (pretty)
 	HTMLOutputFile      string // "" means not set

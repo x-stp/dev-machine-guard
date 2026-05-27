@@ -7,45 +7,31 @@
 package tcc
 
 import (
-	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"sync"
 )
 
 // Enabled reports whether the TCC skipper should be active for this run.
-// The override is the resolved tri-state cfg/config value: nil to defer to
-// the runtime default, true to explicitly include TCC paths (don't skip),
-// false to explicitly exclude (always skip).
+// The override is the resolved tri-state cfg/config value: nil or false
+// to apply the default (skip TCC-protected dirs), true to include them
+// in the scan.
 //
-// The default (nil override) only skips when the process is running under
-// macOS launchd: that's the context in which TCC permission prompts
-// actually fire and there's nobody at a keyboard to dismiss them. Direct
-// CLI invocations typically inherit Terminal.app's TCC grants and don't
-// see prompts, so they default to full scan coverage.
+// Default behavior is to skip — both community (`scan`) and enterprise
+// (`send-telemetry`) runs avoid TCC-protected paths so the agent never
+// triggers permission prompts. Customers who have granted the agent
+// access (via a PPPC profile pushed by their MDM, or by manually
+// approving "Full Disk Access" in System Settings) flip the bool to
+// `true` to opt those paths back into the scan. See
+// docs/macos-tcc-permissions.md for the configuration recipe.
 func Enabled(override *bool) bool {
-	if override != nil {
-		// Override semantics: true = "include TCC paths" = skipper OFF.
-		return !*override
-	}
-	return IsRunningUnderLaunchd()
-}
-
-// IsRunningUnderLaunchd reports whether the process appears to be running
-// as a macOS launchd-managed daemon or agent. Detection signals (in
-// order): an explicit STEPSEC_VIA_LAUNCHD=1 env var (escape hatch for
-// tests and forward-compat plist changes), then PPID==1 on darwin
-// (launchd is PID 1 and reparents its jobs). Returns false off darwin.
-func IsRunningUnderLaunchd() bool {
-	if os.Getenv("STEPSEC_VIA_LAUNCHD") == "1" {
-		return true
-	}
-	if runtime.GOOS != "darwin" {
+	if override != nil && *override {
+		// Explicit include: skipper OFF.
 		return false
 	}
-	return os.Getppid() == 1
+	// Default and explicit exclude both leave the skipper ON.
+	return true
 }
 
 // Skipper matches TCC-protected directories. Build one per scan via New;

@@ -30,12 +30,12 @@ type Config struct {
 	EnableBrewScan        *bool  // nil=auto, true/false=explicit
 	EnablePythonScan      *bool  // nil=auto, true/false=explicit
 	IncludeBundledPlugins bool   // --include-bundled-plugins: include bundled/platform plugins in output
-	// IncludeTCCProtected is tristate: nil = use the runtime default
-	// (skip only when running under launchd, where TCC prompts actually
-	// fire), true = always include the protected dirs (skipper off),
-	// false = always exclude them (skipper on). Wired via
-	// --include-tcc-protected / --no-include-tcc-protected and the
-	// matching field in config.ConfigFile.
+	// IncludeTCCProtected is tristate: nil or false = skip the macOS
+	// TCC-protected dirs (Documents, Downloads, ~/Library/Mail, ...)
+	// so the agent never triggers permission prompts; true = scan them.
+	// Customers who have granted the agent Full Disk Access (e.g., via
+	// an MDM-pushed PPPC profile) flip this to true to opt back into
+	// full scan coverage. See docs/macos-tcc-permissions.md.
 	IncludeTCCProtected *bool
 	NPMRCOnly           bool     // --npmrc: run only the npmrc audit and render verbose pretty output
 	PipConfigOnly       bool     // --pipconfig: run only the pip config audit and render verbose pretty output
@@ -418,11 +418,12 @@ Options:
   --disable-python-scan         Disable Python package scanning
   --include-bundled-plugins     Include bundled/platform plugins in output (Windows)
   --include-tcc-protected       Scan macOS TCC-protected dirs (Documents, Downloads,
-                                ~/Library/Mail, etc.). Default: skipped only when
-                                running under launchd (where permission prompts
-                                fire); direct CLI runs scan them.
-  --no-include-tcc-protected    Force-skip macOS TCC-protected dirs even on direct
-                                CLI runs.
+                                ~/Library/Mail, etc.). Default: skipped to avoid
+                                permission prompts. Pass after granting the agent
+                                Full Disk Access via PPPC profile or System
+                                Settings — see docs/macos-tcc-permissions.md.
+  --no-include-tcc-protected    Skip macOS TCC-protected dirs even if config has
+                                include_tcc_protected: true.
   --npmrc                       Run ONLY the npm config audit (verbose pretty view; --json supported)
   --pipconfig                   Run ONLY the pip config audit (verbose pretty view; --json supported)
   --log-level=LEVEL      Log level: error | warn | info | debug (default: info)

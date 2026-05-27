@@ -67,8 +67,6 @@ func TestSkipper_EmptyHome(t *testing.T) {
 }
 
 func TestEnabled(t *testing.T) {
-	t.Setenv("STEPSEC_VIA_LAUNCHD", "1") // force launchd-context for the nil-override branch
-
 	trueVal := true
 	falseVal := false
 
@@ -77,7 +75,7 @@ func TestEnabled(t *testing.T) {
 		override *bool
 		want     bool
 	}{
-		{"nil override under launchd → skipper on", nil, true},
+		{"nil override → skipper on (default skip)", nil, true},
 		{"explicit include (true) → skipper off", &trueVal, false},
 		{"explicit exclude (false) → skipper on", &falseVal, true},
 	}
@@ -87,14 +85,6 @@ func TestEnabled(t *testing.T) {
 				t.Errorf("Enabled(%v) = %v, want %v", tc.override, got, tc.want)
 			}
 		})
-	}
-}
-
-func TestEnabled_DirectInvocationDefault(t *testing.T) {
-	t.Setenv("STEPSEC_VIA_LAUNCHD", "")
-	// On a test runner PPID is the go test process, not launchd, so IsRunningUnderLaunchd is false.
-	if Enabled(nil) {
-		t.Error("Enabled(nil) should be false when not running under launchd")
 	}
 }
 
