@@ -40,18 +40,26 @@ modern macOS (anchored at the logged-in user's `$HOME`):
 ~/Movies                   ~/Library/Reminders
 ~/Music                    ~/Library/HomeKit
 ~/Public                   ~/Library/Suggestions
-~/.Trash                   ~/Library/Application Support/AddressBook
-~/Library/Mobile Documents ~/Library/Application Support/CallHistoryDB
-~/Library/CloudStorage     ~/Library/Application Support/CallHistoryTransactions
-                           ~/Library/IdentityServices
-                           ~/Library/Metadata/CoreSpotlight
-                           ~/Library/PersonalizationPortrait
-                           ~/Library/Containers/com.apple.mail
-                           ~/Library/Group Containers/group.com.apple.calendar
-                           ~/Library/Group Containers/group.com.apple.notes
+~/.Trash                   ~/Library/IdentityServices
+~/Library/Mobile Documents ~/Library/Metadata/CoreSpotlight
+~/Library/CloudStorage     ~/Library/PersonalizationPortrait
+~/Library/Containers       ~/Library/Application Support/AddressBook
+~/Library/Group Containers ~/Library/Application Support/CallHistoryDB
+~/Library/Application      ~/Library/Application Support/CallHistoryTransactions
+  Scripts                  ~/Library/Application Support/com.apple.TCC
 
 /Volumes/.timemachine*     (Time Machine local snapshots, prefix match)
 ```
+
+The two parent skips that look broad (`~/Library/Containers` and
+`~/Library/Group Containers`) collapse per-app sandbox containers in
+one go. Apple gates many of those subtrees behind separate TCC
+services on modern macOS — Photos for `com.apple.Photos`, Media
+Library for `com.apple.Music`, and the Sonoma "App Management" /
+"Data from other apps" prompt for arbitrary `<app>/Data` subdirs. The
+contents (per-app sandbox state) aren't meaningful inventory data for
+the agent's purpose, so the broader skip avoids three distinct popup
+categories without losing useful coverage.
 
 If a search dir is explicitly named (`--search-dirs ~/Documents`) the
 walk root itself is honored — the skip only applies to TCC paths

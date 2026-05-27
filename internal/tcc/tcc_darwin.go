@@ -31,12 +31,20 @@ var protectedSuffixes = []string{
 	"Library/Application Support/AddressBook",
 	"Library/Application Support/CallHistoryDB",
 	"Library/Application Support/CallHistoryTransactions",
+	"Library/Application Support/com.apple.TCC",
 	"Library/IdentityServices",
 	"Library/Metadata/CoreSpotlight",
 	"Library/PersonalizationPortrait",
-	"Library/Containers/com.apple.mail",
-	"Library/Group Containers/group.com.apple.calendar",
-	"Library/Group Containers/group.com.apple.notes",
+
+	// App sandbox containers — skipped wholesale because any descent into
+	// these triggers per-service prompts (Photos for com.apple.Photos,
+	// Media Library for com.apple.Music, the macOS Sonoma "App Management"
+	// / "Data from other apps" prompt for arbitrary <app>/Data subdirs).
+	// Nothing inside an app's sandbox is meaningful inventory data for
+	// dev-machine-guard's purpose, so the broader skip is a clean win.
+	"Library/Containers",
+	"Library/Group Containers",
+	"Library/Application Scripts",
 
 	"Library/Mobile Documents",
 	"Library/CloudStorage",
