@@ -175,6 +175,17 @@ func (lc *LogCapture) Finalize() string {
 	return base64.StdEncoding.EncodeToString(lc.ringBytesLocked())
 }
 
+// SnapshotBase64 returns the base64-encoded buffer contents WITHOUT stopping
+// capture, so a caller can embed the session-so-far in the telemetry payload
+// while the capture keeps recording (e.g. through the upload that follows).
+// The real teardown — closing the pipe and restoring os.Stderr — stays in
+// Finalize, which the caller still defers. Safe to call during active capture.
+func (lc *LogCapture) SnapshotBase64() string {
+	lc.mu.Lock()
+	defer lc.mu.Unlock()
+	return base64.StdEncoding.EncodeToString(lc.ringBytesLocked())
+}
+
 // Tail returns the last n captured bytes as a fresh slice. Safe to call
 // concurrently with active capture; returns nil if the buffer is empty
 // or n ≤ 0. Used by heartbeat posts to ship the most recent diagnostic

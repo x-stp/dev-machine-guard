@@ -234,12 +234,12 @@ func Run(exec executor.Executor, log *progress.Logger, cfg *cli.Config) (err err
 	// produces snapshots without a log tail.
 	var tailEmitter *logTailEmitter
 
-	// postPhase is the convergence point for phase-boundary and heartbeat
-	// progress updates. Captured here so the heartbeat goroutine and the
-	// inline phase wrappers share a single call site.
-	postPhase := func() {
+	// sendSnapshot builds a progress snapshot, lets attach() decide the log
+	// tail, and hands it to the phase-post worker (drop-oldest so the freshest
+	// snapshot always lands).
+	sendSnapshot := func(attach func(*RunStatusInfo)) {
 		snap := tracker.Snapshot()
-		tailEmitter.MaybeAttach(&snap)
+		attach(&snap)
 		phaseSendMu.Lock()
 		defer phaseSendMu.Unlock()
 		// Drop any queued (older) snapshot so the freshest one always lands.
@@ -250,6 +250,19 @@ func Run(exec executor.Executor, log *progress.Logger, cfg *cli.Config) (err err
 		// Always succeeds: buffer=1, just drained, single sender under the mutex.
 		phaseCh <- snap
 	}
+
+	// postPhase is the convergence point for phase-boundary and heartbeat
+	// progress updates. Captured here so the heartbeat goroutine and the
+	// inline phase wrappers share a single call site. The log tail is
+	// throttle-gated (MaybeAttach) so rapid phase boundaries don't each ship one.
+	postPhase := func() { sendSnapshot(tailEmitter.MaybeAttach) }
+
+	// postPhaseFinal is the single post emitted after the telemetry upload
+	// completes. It FORCES a fresh tail (ForceAttach, bypassing the throttle)
+	// so the run-status row's log tail includes the upload's own output and the
+	// completion line — the final lines a throttled MaybeAttach would drop on a
+	// short run.
+	postPhaseFinal := func() { sendSnapshot(tailEmitter.ForceAttach) }
 
 	// Catch SIGINT / SIGTERM so cancellation (Ctrl+C, launchd stop, kill)
 	// still records a failure row and fires the Slack alert before exit.
@@ -756,8 +769,13 @@ func Run(exec executor.Executor, log *progress.Logger, cfg *cli.Config) (err err
 	log.Progress("  pip available: %v, files discovered: %d, findings: %d", pipAudit.Available, len(pipAudit.Files), len(pipAudit.Findings))
 	fmt.Fprintln(os.Stderr)
 
-	// Finalize execution logs before building payload
-	execLogsBase64 := capture.Finalize()
+	// Snapshot execution logs for the payload WITHOUT stopping capture, so the
+	// upload that follows (and the completion lines) keep being recorded and
+	// can ship in the final run-status log tail via postPhaseFinal below. The
+	// payload itself can't contain the log of its own upload, so this snapshot
+	// is "session so far" by design. The deferred capture.Finalize() does the
+	// real teardown (restores os.Stderr) on return.
+	execLogsBase64 := capture.SnapshotBase64()
 	endTime := time.Now()
 
 	// Snapshot the final progress state right before we serialize. By this
@@ -835,14 +853,25 @@ func Run(exec executor.Executor, log *progress.Logger, cfg *cli.Config) (err err
 	log.Progress("Requesting upload URL from backend...")
 	if err := uploadToS3(phaseCtx, log, payload, executionID, tracker); err != nil {
 		endPhase(phaseCtx, phaseCancel, tracker, log, "telemetry_upload")
+		// Force-attach a final tail capturing the upload-failure output before
+		// returning. The deferred failure report carries no status_info (and so
+		// can't ship a tail itself); this progress upsert lands the tail on the
+		// row, which the subsequent "failed" transition preserves.
+		postPhaseFinal()
 		return fmt.Errorf("uploading telemetry: %w", err)
 	}
 	endPhase(phaseCtx, phaseCancel, tracker, log, "telemetry_upload")
-	postPhase()
 
 	fmt.Fprintln(os.Stderr)
 	log.Progress("Telemetry collection completed successfully")
 	tccSkipper.LogHits(log.Debug)
+
+	// Final progress post — AFTER the upload and the completion lines above —
+	// with a forced fresh tail (bypassing the throttle) so the run-status row's
+	// log tail includes them. Without this the last lines after the upload are
+	// skipped. Capture is still live; the deferred capture.Finalize() restores
+	// os.Stderr on return, after the phase-post worker has drained this snapshot.
+	postPhaseFinal()
 	return nil
 }
 

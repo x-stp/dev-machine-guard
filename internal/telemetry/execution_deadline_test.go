@@ -24,12 +24,14 @@ func TestExecutionDeadlineFromEnv(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			// Always set the var (to "" for the unset cases) so the test is
+			// hermetic: a value inherited from the host or a CI job must not
+			// leak into the "unset" cases. os.Getenv treats truly-unset and
+			// empty identically, so "" exercises the same fall-through path.
 			if tc.set {
 				t.Setenv("STEPSEC_MAX_EXECUTION_DURATION", tc.env)
 			} else {
-				// Belt-and-braces: t.Setenv resets at test exit, but
-				// nothing in this package mutates the env at init.
-				_ = tc.env
+				t.Setenv("STEPSEC_MAX_EXECUTION_DURATION", "")
 			}
 			got := ExecutionDeadlineFromEnv()
 			if got != tc.want {
@@ -63,8 +65,12 @@ func TestExecutionDeadline_EnvThenConfigThenDefault(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			// Always set the var (to "" when setEnv is false) so an inherited
+			// host/CI value can't bypass the config-fallback cases under test.
 			if tc.setEnv {
 				t.Setenv("STEPSEC_MAX_EXECUTION_DURATION", tc.env)
+			} else {
+				t.Setenv("STEPSEC_MAX_EXECUTION_DURATION", "")
 			}
 			got := ExecutionDeadline(tc.configVal)
 			if got != tc.want {

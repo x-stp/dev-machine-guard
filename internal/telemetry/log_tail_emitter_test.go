@@ -63,16 +63,65 @@ func TestLogTailEmitter_ThrottlesAttachments(t *testing.T) {
 	}
 }
 
+// ForceAttach must attach the current tail even inside the throttle window —
+// the final post-upload snapshot depends on it so the last lines (the upload's
+// own output) aren't dropped by the throttle on a sub-2-minute run.
+func TestLogTailEmitter_ForceAttachBypassesThrottle(t *testing.T) {
+	lc := &LogCapture{ring: newRingBuffer(64 * 1024)}
+	lc.ring.Write([]byte("startup output\n"))
+
+	clk := &stepClock{t: time.Unix(1_700_000_000, 0)}
+	em := newEmitterWithFakeClock(lc, 2*time.Minute, clk)
+
+	// First MaybeAttach consumes the throttle slot.
+	var snap RunStatusInfo
+	em.MaybeAttach(&snap)
+	if snap.LogTailGzipBase64 == "" {
+		t.Fatal("first MaybeAttach should attach")
+	}
+
+	// Still within the throttle window: MaybeAttach skips, ForceAttach does not.
+	clk.advance(10 * time.Second)
+	lc.ring.Write([]byte("upload completed\n"))
+
+	var throttled RunStatusInfo
+	em.MaybeAttach(&throttled)
+	if throttled.LogTailGzipBase64 != "" {
+		t.Fatal("MaybeAttach within the window should skip")
+	}
+
+	var forced RunStatusInfo
+	em.ForceAttach(&forced)
+	if forced.LogTailGzipBase64 == "" {
+		t.Fatal("ForceAttach must attach even within the throttle window")
+	}
+	if decoded := decodeTail(t, forced.LogTailGzipBase64); !strings.Contains(decoded, "upload completed") {
+		t.Fatalf("ForceAttach must reflect the latest buffer; got %q", decoded)
+	}
+
+	// ForceAttach updated lastSent, so a follow-on MaybeAttach still throttles.
+	clk.advance(10 * time.Second)
+	var after RunStatusInfo
+	em.MaybeAttach(&after)
+	if after.LogTailGzipBase64 != "" {
+		t.Fatal("MaybeAttach should still be throttled after ForceAttach")
+	}
+}
+
 func TestLogTailEmitter_NilSafe(t *testing.T) {
-	// Nil receiver, nil capture, and nil info should all be no-ops, not panics.
+	// Nil receiver, nil capture, and nil info should all be no-ops, not panics —
+	// for both MaybeAttach and ForceAttach.
 	var em *logTailEmitter
 	em.MaybeAttach(&RunStatusInfo{}) // nil receiver
+	em.ForceAttach(&RunStatusInfo{}) // nil receiver
 
 	em2 := newLogTailEmitter(nil, 2*time.Minute)
 	em2.MaybeAttach(&RunStatusInfo{}) // nil capture
+	em2.ForceAttach(&RunStatusInfo{}) // nil capture
 
 	em3 := newLogTailEmitter(&LogCapture{ring: newRingBuffer(1024)}, 2*time.Minute)
 	em3.MaybeAttach(nil) // nil info
+	em3.ForceAttach(nil) // nil info
 }
 
 func TestRingBuffer_TailRespectsWraparound(t *testing.T) {

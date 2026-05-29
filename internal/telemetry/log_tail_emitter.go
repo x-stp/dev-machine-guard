@@ -79,6 +79,30 @@ func (e *logTailEmitter) MaybeAttach(info *RunStatusInfo) {
 	info.LogTailGzipBase64 = encoded
 }
 
+// ForceAttach attaches the current tail regardless of the throttle window.
+// Used for the single final post-upload snapshot so the run-status row carries
+// the most complete tail — including the upload's own output and the
+// completion line — which a throttled MaybeAttach would otherwise drop on a
+// sub-2-minute run. Updates lastSent so any later MaybeAttach still respects
+// the interval. No-op on nil capture / empty buffer.
+func (e *logTailEmitter) ForceAttach(info *RunStatusInfo) {
+	if e == nil || e.capture == nil || info == nil {
+		return
+	}
+	tail := e.capture.Tail(captureTailBytes)
+	if len(tail) == 0 {
+		return
+	}
+	encoded, err := gzipBase64(tail)
+	if err != nil {
+		return
+	}
+	e.mu.Lock()
+	e.lastSent = e.now()
+	e.mu.Unlock()
+	info.LogTailGzipBase64 = encoded
+}
+
 // gzipBase64 gzips b at default compression and base64-encodes the
 // result. Wrapped here rather than inlined so the emitter and tests
 // share a single encoding pipeline.
