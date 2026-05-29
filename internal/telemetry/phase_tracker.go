@@ -120,6 +120,15 @@ func (t *PhaseTracker) Snapshot() RunStatusInfo {
 	defer t.mu.Unlock()
 
 	current := t.currentPhase
+	// Defense in depth: 5 of 10 RocketMortgage heartbeat rows showed
+	// current_phase = "null" (literal string). The agent-side code path
+	// here writes "" between phases and omitempty omits empty strings
+	// from the JSON payload, so the literal should be unreachable — but
+	// guard against any future regression that re-introduces it, keeping
+	// the wire contract explicit (current_phase is never the string "null").
+	if current == "null" {
+		current = ""
+	}
 	if current != "" && t.currentPhaseDetail != "" {
 		current = current + " (" + t.currentPhaseDetail + ")"
 	}

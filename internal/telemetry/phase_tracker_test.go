@@ -88,6 +88,22 @@ func TestPhaseTracker_FinishNoOpWithoutStart(t *testing.T) {
 	}
 }
 
+// Defensive: 5 of 10 RocketMortgage heartbeat rows surfaced the literal
+// string "null" in current_phase. The agent-side code shouldn't ever
+// produce that — Start writes a real phase name and Finish writes "" —
+// but Snapshot now sanitizes it explicitly so the wire contract is
+// "current_phase is never the literal string 'null'" regardless of any
+// future regression.
+func TestPhaseTracker_SnapshotSanitizesLiteralNullCurrentPhase(t *testing.T) {
+	pt := NewPhaseTracker()
+	pt.currentPhase = "null" // bypass the public API to inject the bad state directly
+
+	snap := pt.Snapshot()
+	if snap.CurrentPhase != "" {
+		t.Errorf("current_phase = %q, want empty string (sanitized)", snap.CurrentPhase)
+	}
+}
+
 func TestPhaseTracker_SnapshotIsDefensiveCopy(t *testing.T) {
 	clk := &fakeClock{cur: time.Unix(1_700_000_000, 0), step: time.Second}
 	pt := newPhaseTrackerWithClock(clk.now)

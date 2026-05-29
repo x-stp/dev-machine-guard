@@ -232,6 +232,7 @@ func main() {
 			log.Error("Enterprise configuration not found. Run '%s configure' or download the script from your StepSecurity dashboard.", os.Args[0])
 			os.Exit(1)
 		}
+		armExecutionWatchdog(telemetry.ExecutionDeadlineFromEnv(), log)
 		if err := telemetry.Run(exec, log, cfg); err != nil {
 			log.Error("%v", err)
 			os.Exit(1)
@@ -266,6 +267,7 @@ func main() {
 		}
 		log.Progress("Sending initial telemetry...")
 		fmt.Println()
+		armExecutionWatchdog(telemetry.ExecutionDeadlineFromEnv(), log)
 		telemetryErr := telemetry.Run(exec, log, cfg)
 
 		// On Linux, systemd.Install enabled the timer but did not start it.
@@ -369,6 +371,7 @@ func main() {
 			}
 		case config.IsEnterpriseMode():
 			log.Debug("dispatch: enterprise telemetry (auto-detected)")
+			armExecutionWatchdog(telemetry.ExecutionDeadlineFromEnv(), log)
 			if err := telemetry.Run(exec, log, cfg); err != nil {
 				log.Error("%v", err)
 				os.Exit(1)

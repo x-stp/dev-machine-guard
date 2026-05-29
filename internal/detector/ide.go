@@ -51,16 +51,24 @@ var ideDefinitions = []ideSpec{
 	},
 	{
 		AppName: "Windsurf", IDEType: "windsurf", Vendor: "Codeium",
-		AppPath: "/Applications/Windsurf.app", BinaryPath: "Contents/MacOS/Windsurf",
-		// Use the .cmd console wrapper to avoid launching the GUI
+		AppPath: "/Applications/Windsurf.app", BinaryPath: "Contents/Resources/app/bin/windsurf",
+		// macOS BinaryPath points at the CLI shim (Contents/Resources/app/bin/windsurf),
+		// NOT the GUI binary Contents/MacOS/Windsurf, matching VS Code and Cursor — the
+		// shim prints --version and exits without opening a window. resolveDarwinVersion
+		// reads package.json before ever reaching the shim, so it's only a safe fallback.
+		// Windows uses the .cmd console wrapper for the same reason.
 		WinPaths: []string{`%LOCALAPPDATA%\Programs\Windsurf`}, WinBinary: `resources\app\bin\windsurf.cmd`,
 		LinuxPaths: []string{"/opt/Windsurf", "/usr/share/windsurf", "~/.local/share/windsurf"}, LinuxBinary: "windsurf",
 		VersionFlag: "--version",
 	},
 	{
 		AppName: "Antigravity", IDEType: "antigravity", Vendor: "Google",
-		AppPath: "/Applications/Antigravity.app", BinaryPath: "Contents/MacOS/Antigravity",
-		// Use the .cmd console wrapper to avoid launching the GUI
+		AppPath: "/Applications/Antigravity.app", BinaryPath: "Contents/Resources/app/bin/antigravity",
+		// macOS BinaryPath points at the CLI shim (Contents/Resources/app/bin/antigravity),
+		// NOT the GUI binary Contents/MacOS/Antigravity. The GUI binary is what opened a
+		// window in customers' faces (Coveo incident); the shim prints --version and exits.
+		// resolveDarwinVersion reads package.json first, so the shim is only a safe fallback.
+		// Windows uses the .cmd console wrapper for the same reason.
 		WinPaths: []string{`%LOCALAPPDATA%\Programs\Antigravity`}, WinBinary: `resources\app\bin\antigravity.cmd`,
 		LinuxPaths: []string{"/opt/Antigravity", "/usr/share/antigravity"}, LinuxBinary: "antigravity",
 		VersionFlag: "--version",
@@ -225,31 +233,48 @@ func (d *IDEDetector) detectDarwin(ctx context.Context, spec ideSpec) (model.IDE
 	if !d.exec.DirExists(spec.AppPath) {
 		return model.IDE{}, false
 	}
+	return model.IDE{
+		IDEType: spec.IDEType, Version: d.resolveDarwinVersion(ctx, spec), InstallPath: spec.AppPath,
+		Vendor: spec.Vendor, IsInstalled: true,
+	}, true
+}
 
-	version := "unknown"
-
-	// Try version from binary
+// resolveDarwinVersion tries package.json, product-info.json, Info.plist,
+// and finally the binary --version in that order. The static-first order
+// is critical because some IDEs' BinaryPath points at Contents/MacOS/<App>
+// (a GUI binary) — invoking that flashes a window and, before PR #122's
+// process-group fix, hung indefinitely when Electron helpers held stdout
+// open. Apple-signed apps always carry CFBundleShortVersionString in
+// Info.plist, so the exec path is a last-ditch fallback for bundles
+// missing one. Mirrors resolveWindowsVersionFromDir's package.json
+// fast-path (ide.go:389-412) on a platform where it was previously absent.
+func (d *IDEDetector) resolveDarwinVersion(ctx context.Context, spec ideSpec) string {
+	// 1. package.json — covers Electron IDEs (VS Code, Cursor, Windsurf, Antigravity, and any future Electron-based IDE).
+	if v := readJSONVersion(d.exec, filepath.Join(spec.AppPath, "Contents", "Resources", "app", "package.json")); v != "unknown" {
+		return v
+	}
+	// 2. product-info.json — JetBrains IDEs.
+	if v := readJSONVersion(d.exec, filepath.Join(spec.AppPath, "Contents", "Resources", "product-info.json")); v != "unknown" {
+		return v
+	}
+	// 3. Info.plist — every signed .app carries CFBundleShortVersionString
+	//    (Zed, Claude.app, Copilot.app, Xcode, Eclipse on macOS, …).
+	if v := readPlistVersion(ctx, d.exec, filepath.Join(spec.AppPath, "Contents", "Info.plist")); v != "unknown" {
+		return v
+	}
+	// 4. Last-resort binary exec. For IDEs whose BinaryPath is a CLI shim
+	//    (VS Code, Cursor) this is safe; for those whose BinaryPath is a
+	//    GUI binary (Windsurf, Antigravity, Zed) we will normally not
+	//    reach this — package.json or Info.plist will have already
+	//    returned. Kept as a hedge for hypothetical bundles missing all
+	//    three static metadata files.
 	if spec.BinaryPath != "" && spec.VersionFlag != "" {
 		binaryFull := filepath.Join(spec.AppPath, spec.BinaryPath)
 		if d.exec.FileExists(binaryFull) {
-			version = runVersionCmd(ctx, d.exec, binaryFull, spec.VersionFlag)
+			return runVersionCmd(ctx, d.exec, binaryFull, spec.VersionFlag)
 		}
 	}
-
-	// Fallback: product-info.json (JetBrains IDEs)
-	if version == "unknown" {
-		version = readJSONVersion(d.exec, filepath.Join(spec.AppPath, "Contents", "Resources", "product-info.json"))
-	}
-
-	// Fallback: Info.plist
-	if version == "unknown" {
-		version = readPlistVersion(ctx, d.exec, filepath.Join(spec.AppPath, "Contents", "Info.plist"))
-	}
-
-	return model.IDE{
-		IDEType: spec.IDEType, Version: version, InstallPath: spec.AppPath,
-		Vendor: spec.Vendor, IsInstalled: true,
-	}, true
+	return "unknown"
 }
 
 func (d *IDEDetector) detectLinux(ctx context.Context, spec ideSpec) (model.IDE, bool) {

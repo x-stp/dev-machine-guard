@@ -239,6 +239,134 @@ func TestIDEDetector_FindsIntelliJ_macOS_PlistFallback(t *testing.T) {
 	}
 }
 
+// macOS Electron IDEs that previously had BinaryPath pointing at
+// Contents/MacOS/<App> (a GUI binary) — Windsurf, Antigravity. Without
+// the package.json fast-path in resolveDarwinVersion, runVersionCmd
+// would shell out to the GUI binary and flash a window; before PR #122's
+// process-group fix it also hung indefinitely. These tests register NO
+// command for the binary path: if the detector falls through, the mock
+// returns an unregistered-command error and version stays "unknown",
+// failing the assertion.
+
+func TestIDEDetector_Darwin_Windsurf_PackageJSONFastPath(t *testing.T) {
+	mock := executor.NewMock()
+	mock.SetDir("/Applications/Windsurf.app")
+	mock.SetFile("/Applications/Windsurf.app/Contents/Resources/app/package.json",
+		[]byte(`{"name":"Windsurf","version":"1.42.0"}`))
+
+	det := NewIDEDetector(mock)
+	results := det.Detect(context.Background())
+
+	found := findIDE(results, "windsurf")
+	if found == nil {
+		t.Fatal("expected Windsurf to be detected")
+	}
+	if found.Version != "1.42.0" {
+		t.Errorf("version should come from package.json (1.42.0), got %s", found.Version)
+	}
+}
+
+func TestIDEDetector_Darwin_Antigravity_PackageJSONFastPath(t *testing.T) {
+	mock := executor.NewMock()
+	mock.SetDir("/Applications/Antigravity.app")
+	mock.SetFile("/Applications/Antigravity.app/Contents/Resources/app/package.json",
+		[]byte(`{"name":"Antigravity","version":"0.3.1"}`))
+
+	det := NewIDEDetector(mock)
+	results := det.Detect(context.Background())
+
+	found := findIDE(results, "antigravity")
+	if found == nil {
+		t.Fatal("expected Antigravity to be detected")
+	}
+	if found.Version != "0.3.1" {
+		t.Errorf("version should come from package.json (0.3.1), got %s", found.Version)
+	}
+}
+
+// Defense in depth for the Coveo incident: even when every static version
+// source is missing — forcing resolveDarwinVersion all the way to the exec
+// fallback — the target must be the CLI shim (Contents/Resources/app/bin/
+// antigravity), NEVER the GUI binary (Contents/MacOS/Antigravity) that
+// opened a window in the customer's face. The GUI binary path is poisoned
+// here with a sentinel version; if the detector ever targets it, the test
+// fails loudly. (Windsurf shares the identical code path and spec shape.)
+func TestIDEDetector_Darwin_Antigravity_FallbackUsesCLIShimNotGUIBinary(t *testing.T) {
+	mock := executor.NewMock()
+	mock.SetDir("/Applications/Antigravity.app")
+	// No package.json, no product-info.json, no Info.plist → all three static
+	// reads return "unknown", forcing the binary-exec fallback.
+	shim := "/Applications/Antigravity.app/Contents/Resources/app/bin/antigravity"
+	mock.SetFile(shim, []byte{})
+	mock.SetCommand("0.5.0", "", 0, shim, "--version")
+	// Poison the GUI binary: reaching it would surface this sentinel.
+	guiBinary := "/Applications/Antigravity.app/Contents/MacOS/Antigravity"
+	mock.SetFile(guiBinary, []byte{})
+	mock.SetCommand("9.9.9-GUI-LAUNCHED", "", 0, guiBinary, "--version")
+
+	det := NewIDEDetector(mock)
+	results := det.Detect(context.Background())
+
+	found := findIDE(results, "antigravity")
+	if found == nil {
+		t.Fatal("expected Antigravity to be detected")
+	}
+	if found.Version == "9.9.9-GUI-LAUNCHED" {
+		t.Fatal("GUI binary Contents/MacOS/Antigravity was executed — it must never be the exec target")
+	}
+	if found.Version != "0.5.0" {
+		t.Errorf("expected version from CLI shim (0.5.0), got %s", found.Version)
+	}
+}
+
+// Zed is Rust, not Electron — there is no Contents/Resources/app/package.json.
+// It falls through to Info.plist instead. Same guarantee: no exec of the
+// Contents/MacOS/zed GUI binary.
+func TestIDEDetector_Darwin_Zed_PlistFastPath(t *testing.T) {
+	mock := executor.NewMock()
+	mock.SetDir("/Applications/Zed.app")
+	mock.SetFile("/Applications/Zed.app/Contents/Info.plist", []byte{})
+	mock.SetCommand("0.180.4", "", 0, "/usr/libexec/PlistBuddy", "-c",
+		"Print :CFBundleShortVersionString", "/Applications/Zed.app/Contents/Info.plist")
+
+	det := NewIDEDetector(mock)
+	results := det.Detect(context.Background())
+
+	found := findIDE(results, "zed")
+	if found == nil {
+		t.Fatal("expected Zed to be detected")
+	}
+	if found.Version != "0.180.4" {
+		t.Errorf("version should come from Info.plist (0.180.4), got %s", found.Version)
+	}
+}
+
+// VS Code's BinaryPath is the safe CLI shim, but the package.json fast-path
+// still wins because we want zero subprocess overhead for every macOS IDE
+// detection — not just the ones whose binary would hang. Asserts the
+// package.json version is reported even when the binary would also work.
+func TestIDEDetector_Darwin_VSCode_PackageJSONPreferred(t *testing.T) {
+	mock := executor.NewMock()
+	mock.SetDir("/Applications/Visual Studio Code.app")
+	mock.SetFile("/Applications/Visual Studio Code.app/Contents/Resources/app/package.json",
+		[]byte(`{"name":"Code","version":"1.96.0"}`))
+	binaryPath := "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"
+	mock.SetFile(binaryPath, []byte{})
+	// Register a different version on the binary so we can prove the fast-path won.
+	mock.SetCommand("1.95.0\n1234abcd\nx64", "", 0, binaryPath, "--version")
+
+	det := NewIDEDetector(mock)
+	results := det.Detect(context.Background())
+
+	found := findIDE(results, "vscode")
+	if found == nil {
+		t.Fatal("expected VS Code to be detected")
+	}
+	if found.Version != "1.96.0" {
+		t.Errorf("expected 1.96.0 (package.json fast-path), got %s", found.Version)
+	}
+}
+
 func TestIDEDetector_FindsEclipse_macOS(t *testing.T) {
 	mock := executor.NewMock()
 	mock.SetDir("/Applications/Eclipse.app")
