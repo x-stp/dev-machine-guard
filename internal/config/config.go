@@ -27,22 +27,33 @@ var (
 	InstallDir          string // "" means default (~/.stepsecurity); non-empty makes the agent put all its files (logs, hook errors, future state) under this directory. Bootstrap config.json itself stays at the legacy location. Per-run opt-out is the CLI flag --install-dir=. Resolution: --install-dir flag > STEPSECURITY_HOME env > this field > default — see internal/paths.
 )
 
+// MaxExecutionDuration is the whole-process execution-watchdog limit
+// (STEPSEC_MAX_EXECUTION_DURATION). Persisted into config.json at install time
+// so scheduler-fired runs (launchd/systemd/schtasks) — which invoke the binary
+// directly and never inherit the loader-exported env var — resolve the same
+// value the loader configured. "" means fall back to the binary's built-in
+// default (4h). Declared in its own var block (not the placeholder group
+// above) because it carries no build-time {{...}} placeholder. See
+// telemetry.ExecutionDeadline.
+var MaxExecutionDuration string
+
 // ConfigFile is the JSON structure persisted to ~/.stepsecurity/config.json.
 type ConfigFile struct {
-	CustomerID          string   `json:"customer_id,omitempty"`
-	APIEndpoint         string   `json:"api_endpoint,omitempty"`
-	APIKey              string   `json:"api_key,omitempty"`
-	ScanFrequencyHours  string   `json:"scan_frequency_hours,omitempty"`
-	SearchDirs          []string `json:"search_dirs,omitempty"`
-	EnableNPMScan       *bool    `json:"enable_npm_scan,omitempty"`
-	EnableBrewScan      *bool    `json:"enable_brew_scan,omitempty"`
-	EnablePythonScan    *bool    `json:"enable_python_scan,omitempty"`
-	IncludeTCCProtected *bool    `json:"include_tcc_protected,omitempty"`
-	ColorMode           string   `json:"color_mode,omitempty"`
-	OutputFormat        string   `json:"output_format,omitempty"`
-	HTMLOutputFile      string   `json:"html_output_file,omitempty"`
-	LogLevel            string   `json:"log_level,omitempty"`
-	InstallDir          string   `json:"install_dir,omitempty"`
+	CustomerID           string   `json:"customer_id,omitempty"`
+	APIEndpoint          string   `json:"api_endpoint,omitempty"`
+	APIKey               string   `json:"api_key,omitempty"`
+	ScanFrequencyHours   string   `json:"scan_frequency_hours,omitempty"`
+	SearchDirs           []string `json:"search_dirs,omitempty"`
+	EnableNPMScan        *bool    `json:"enable_npm_scan,omitempty"`
+	EnableBrewScan       *bool    `json:"enable_brew_scan,omitempty"`
+	EnablePythonScan     *bool    `json:"enable_python_scan,omitempty"`
+	IncludeTCCProtected  *bool    `json:"include_tcc_protected,omitempty"`
+	ColorMode            string   `json:"color_mode,omitempty"`
+	OutputFormat         string   `json:"output_format,omitempty"`
+	HTMLOutputFile       string   `json:"html_output_file,omitempty"`
+	LogLevel             string   `json:"log_level,omitempty"`
+	InstallDir           string   `json:"install_dir,omitempty"`
+	MaxExecutionDuration string   `json:"max_execution_duration,omitempty"`
 }
 
 // userConfigDir returns ~/.stepsecurity — the per-user config location.
@@ -171,6 +182,9 @@ func Load() {
 	}
 	if cfg.InstallDir != "" && InstallDir == "" {
 		InstallDir = cfg.InstallDir
+	}
+	if cfg.MaxExecutionDuration != "" && MaxExecutionDuration == "" {
+		MaxExecutionDuration = cfg.MaxExecutionDuration
 	}
 }
 
@@ -641,4 +655,25 @@ func RunConfigureNonInteractive(opts NonInteractiveOptions) error {
 
 	fmt.Printf("Configuration saved to %s\n", WriteConfigFilePath())
 	return nil
+}
+
+// PersistMaxExecutionDuration records the STEPSEC_MAX_EXECUTION_DURATION value
+// the loader exported into config.json at install time. Scheduler-fired runs
+// (launchd/systemd/schtasks) invoke the binary directly and never inherit the
+// loader's exported env var, so without this they fall back to the built-in 4h
+// default regardless of the loader's MAX_EXECUTION_DURATION_HOURS. Persisting
+// it lets telemetry.ExecutionDeadline pick it up on every scheduled run.
+// Read-modify-write so the loader-written customer_id/api_key/etc. survive.
+// No-op when value is empty (a direct binary install with no loader-configured
+// value keeps the built-in default).
+func PersistMaxExecutionDuration(value string) error {
+	if value == "" {
+		return nil
+	}
+	existing := loadExisting()
+	if existing.MaxExecutionDuration == value {
+		return nil
+	}
+	existing.MaxExecutionDuration = value
+	return save(existing)
 }

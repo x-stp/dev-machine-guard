@@ -26,6 +26,13 @@ type RunStatusInfo struct {
 	PhasesCompleted []PhaseCompletion `json:"phases_completed,omitempty"`
 	CurrentPhase    string            `json:"current_phase,omitempty"`
 	ElapsedMs       int64             `json:"elapsed_ms"`
+	// LogTailGzipBase64 is an optional snapshot of the most recent
+	// captureTailBytes bytes of the agent's stderr stream, gzip-compressed
+	// and base64-encoded. Attached on a throttle (logTailHeartbeatInterval)
+	// so the wire cost stays bounded even when phase boundaries fire
+	// rapidly. Backend handlers must tolerate this field being absent on
+	// any given snapshot.
+	LogTailGzipBase64 string `json:"log_tail_gzip_b64,omitempty"`
 }
 
 // PhaseTracker accumulates phase lifecycle events for a single telemetry
@@ -120,6 +127,15 @@ func (t *PhaseTracker) Snapshot() RunStatusInfo {
 	defer t.mu.Unlock()
 
 	current := t.currentPhase
+	// Defense in depth: 5 of 10 RocketMortgage heartbeat rows showed
+	// current_phase = "null" (literal string). The agent-side code path
+	// here writes "" between phases and omitempty omits empty strings
+	// from the JSON payload, so the literal should be unreachable — but
+	// guard against any future regression that re-introduces it, keeping
+	// the wire contract explicit (current_phase is never the string "null").
+	if current == "null" {
+		current = ""
+	}
 	if current != "" && t.currentPhaseDetail != "" {
 		current = current + " (" + t.currentPhaseDetail + ")"
 	}

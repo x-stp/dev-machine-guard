@@ -33,8 +33,11 @@ const (
 	// runStatusHeartbeatInterval is how often the telemetry run posts a
 	// status_info snapshot while a scan is in flight. Phase-boundary posts
 	// fire on top of this so a fast run still surfaces phase completions
-	// without waiting for the next tick.
-	runStatusHeartbeatInterval = 5 * time.Minute
+	// without waiting for the next tick. 2 minutes (matching the log-tail
+	// emitter's throttle, log_tail_emitter.go) gives tighter visibility into
+	// a stuck device — the last heartbeat is at most ~2 min stale — without
+	// meaningfully adding to backend write volume for healthy short scans.
+	runStatusHeartbeatInterval = 2 * time.Minute
 )
 
 // runStatusBody is the JSON shape posted to /telemetry/run-status. Fields

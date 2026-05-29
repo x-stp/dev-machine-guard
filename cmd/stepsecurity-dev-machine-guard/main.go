@@ -232,6 +232,7 @@ func main() {
 			log.Error("Enterprise configuration not found. Run '%s configure' or download the script from your StepSecurity dashboard.", os.Args[0])
 			os.Exit(1)
 		}
+		armExecutionWatchdog(telemetry.ExecutionDeadline(config.MaxExecutionDuration), log)
 		if err := telemetry.Run(exec, log, cfg); err != nil {
 			log.Error("%v", err)
 			os.Exit(1)
@@ -264,8 +265,19 @@ func main() {
 			log.Error("Scheduled installation is not supported on %s", runtime.GOOS)
 			os.Exit(1)
 		}
+
+		// Persist the loader-exported max-execution duration into config.json so
+		// scheduler-fired runs (launchd/systemd/schtasks) — which invoke the
+		// binary directly and never inherit the loader's exported env var — arm
+		// the watchdog with the same value. Best-effort: a write failure just
+		// means scheduled runs fall back to the binary's built-in default.
+		if err := config.PersistMaxExecutionDuration(os.Getenv(telemetry.EnvMaxExecutionDuration)); err != nil {
+			log.Warn("failed to persist max execution duration to config (%v) — scheduled runs will use the built-in default", err)
+		}
+
 		log.Progress("Sending initial telemetry...")
 		fmt.Println()
+		armExecutionWatchdog(telemetry.ExecutionDeadline(config.MaxExecutionDuration), log)
 		telemetryErr := telemetry.Run(exec, log, cfg)
 
 		// On Linux, systemd.Install enabled the timer but did not start it.
@@ -369,6 +381,7 @@ func main() {
 			}
 		case config.IsEnterpriseMode():
 			log.Debug("dispatch: enterprise telemetry (auto-detected)")
+			armExecutionWatchdog(telemetry.ExecutionDeadline(config.MaxExecutionDuration), log)
 			if err := telemetry.Run(exec, log, cfg); err != nil {
 				log.Error("%v", err)
 				os.Exit(1)
