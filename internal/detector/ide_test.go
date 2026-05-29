@@ -284,23 +284,49 @@ func TestIDEDetector_Darwin_Antigravity_PackageJSONFastPath(t *testing.T) {
 	}
 }
 
+// The current Antigravity ships as "Antigravity IDE.app" (verified on a real
+// install: package.json version 1.107.0, bundle id com.google.antigravity-ide).
+// The detector must find it at the renamed bundle path via AppPathAlts and
+// resolve the version from package.json without touching any binary.
+func TestIDEDetector_Darwin_Antigravity_RenamedBundle(t *testing.T) {
+	mock := executor.NewMock()
+	mock.SetDir("/Applications/Antigravity IDE.app")
+	mock.SetFile("/Applications/Antigravity IDE.app/Contents/Resources/app/package.json",
+		[]byte(`{"name":"Antigravity IDE","version":"1.107.0"}`))
+
+	det := NewIDEDetector(mock)
+	results := det.Detect(context.Background())
+
+	found := findIDE(results, "antigravity")
+	if found == nil {
+		t.Fatal("expected Antigravity to be detected at the renamed Antigravity IDE.app bundle")
+	}
+	if found.Version != "1.107.0" {
+		t.Errorf("version should come from package.json (1.107.0), got %s", found.Version)
+	}
+	if found.InstallPath != "/Applications/Antigravity IDE.app" {
+		t.Errorf("InstallPath should be the resolved bundle, got %s", found.InstallPath)
+	}
+}
+
 // Defense in depth for the Coveo incident: even when every static version
 // source is missing — forcing resolveDarwinVersion all the way to the exec
 // fallback — the target must be the CLI shim (Contents/Resources/app/bin/
-// antigravity), NEVER the GUI binary (Contents/MacOS/Antigravity) that
-// opened a window in the customer's face. The GUI binary path is poisoned
-// here with a sentinel version; if the detector ever targets it, the test
-// fails loudly. (Windsurf shares the identical code path and spec shape.)
+// antigravity-ide), NEVER the GUI binary (Contents/MacOS/Electron) which, on a
+// real install, boots the app and hangs instead of printing a version. The GUI
+// binary path is poisoned here with a sentinel; if the detector ever targets
+// it, the test fails loudly. Uses the legacy Antigravity.app path to also
+// exercise AppPathAlts resolution.
 func TestIDEDetector_Darwin_Antigravity_FallbackUsesCLIShimNotGUIBinary(t *testing.T) {
 	mock := executor.NewMock()
-	mock.SetDir("/Applications/Antigravity.app")
+	mock.SetDir("/Applications/Antigravity.app") // legacy bundle name → resolved via AppPathAlts
 	// No package.json, no product-info.json, no Info.plist → all three static
 	// reads return "unknown", forcing the binary-exec fallback.
-	shim := "/Applications/Antigravity.app/Contents/Resources/app/bin/antigravity"
+	shim := "/Applications/Antigravity.app/Contents/Resources/app/bin/antigravity-ide"
 	mock.SetFile(shim, []byte{})
-	mock.SetCommand("0.5.0", "", 0, shim, "--version")
-	// Poison the GUI binary: reaching it would surface this sentinel.
-	guiBinary := "/Applications/Antigravity.app/Contents/MacOS/Antigravity"
+	mock.SetCommand("2.0.3", "", 0, shim, "--version")
+	// Poison the real GUI binary: reaching it would surface this sentinel.
+	guiBinary := "/Applications/Antigravity.app/Contents/MacOS/Electron"
 	mock.SetFile(guiBinary, []byte{})
 	mock.SetCommand("9.9.9-GUI-LAUNCHED", "", 0, guiBinary, "--version")
 
@@ -312,10 +338,44 @@ func TestIDEDetector_Darwin_Antigravity_FallbackUsesCLIShimNotGUIBinary(t *testi
 		t.Fatal("expected Antigravity to be detected")
 	}
 	if found.Version == "9.9.9-GUI-LAUNCHED" {
-		t.Fatal("GUI binary Contents/MacOS/Antigravity was executed — it must never be the exec target")
+		t.Fatal("GUI binary Contents/MacOS/Electron was executed — it must never be the exec target")
 	}
-	if found.Version != "0.5.0" {
-		t.Errorf("expected version from CLI shim (0.5.0), got %s", found.Version)
+	if found.Version != "2.0.3" {
+		t.Errorf("expected version from CLI shim (2.0.3), got %s", found.Version)
+	}
+}
+
+// Linux must be GUI-safe too: resolveLinuxVersion now reads package.json
+// before exec'ing any binary, mirroring macOS/Windows. The renamed Antigravity
+// installs under /opt/antigravity-ide with the CLI named antigravity-ide. Here
+// the in-dir binary is poisoned with a sentinel; if the detector execs it
+// instead of reading package.json, the test fails loudly.
+func TestIDEDetector_Linux_Antigravity_PackageJSONFastPath(t *testing.T) {
+	mock := executor.NewMock()
+	mock.SetGOOS("linux")
+	installDir := "/opt/antigravity-ide/Antigravity-IDE"
+	mock.SetDir(installDir)
+	mock.SetFile(installDir+"/resources/app/package.json",
+		[]byte(`{"name":"Antigravity IDE","version":"1.107.0"}`))
+	// Poison both candidate binary paths: reaching either means we exec'd
+	// instead of reading package.json.
+	for _, b := range []string{installDir + "/bin/antigravity-ide", installDir + "/antigravity-ide"} {
+		mock.SetFile(b, []byte{})
+		mock.SetCommand("9.9.9-GUI-LAUNCHED", "", 0, b, "--version")
+	}
+
+	det := NewIDEDetector(mock)
+	results := det.Detect(context.Background())
+
+	found := findIDE(results, "antigravity")
+	if found == nil {
+		t.Fatal("expected Antigravity to be detected on Linux at /opt/antigravity-ide")
+	}
+	if found.Version == "9.9.9-GUI-LAUNCHED" {
+		t.Fatal("Linux exec'd the binary before reading package.json — GUI-launch risk")
+	}
+	if found.Version != "1.107.0" {
+		t.Errorf("version should come from package.json (1.107.0), got %s", found.Version)
 	}
 }
 
