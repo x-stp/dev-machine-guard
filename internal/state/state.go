@@ -87,7 +87,7 @@ func New(agentVersion string) *State {
 // returns a fresh empty state — the next run becomes a full sync naturally.
 // The error is non-nil only to surface why fallback happened, for logging.
 func Load(path, agentVersion string) (*State, error) {
-	cleanedPath := filepath.Clean(path)	
+	cleanedPath := filepath.Clean(path)
 	data, err := os.ReadFile(cleanedPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
