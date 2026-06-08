@@ -29,8 +29,8 @@ const (
 // backend support has merged.
 var enabled = map[Feature]bool{
 	// FeatureAIAgentHooks:    true,
-	FeatureNPMRCAudit:      true,
-	FeaturePipConfigAudit:  true,
+	FeatureNPMRCAudit:     true,
+	FeaturePipConfigAudit: true,
 	// FeaturePnpmConfigAudit: true,
 	// FeatureBunConfigAudit:  true,
 	// FeatureYarnConfigAudit: true,

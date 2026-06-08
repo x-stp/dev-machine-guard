@@ -417,4 +417,3 @@ func (d *NPMRCDetector) collectEnv() []model.NPMRCEnvVar {
 	}
 	return out
 }
-

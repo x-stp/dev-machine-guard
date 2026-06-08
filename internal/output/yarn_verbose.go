@@ -15,15 +15,15 @@ import (
 // posture. Used to flag entries in the verbose view.
 var yarnSecurityRelevantKeys = map[string]bool{
 	// classic
-	"registry":               true,
-	"strict-ssl":             true,
-	"ignore-scripts":         true,
-	"network-timeout":        true,
-	"yarn-offline-mirror":    true,
-	"cafile":                 true,
-	"ca":                     true,
-	"proxy":                  true,
-	"https-proxy":            true,
+	"registry":            true,
+	"strict-ssl":          true,
+	"ignore-scripts":      true,
+	"network-timeout":     true,
+	"yarn-offline-mirror": true,
+	"cafile":              true,
+	"ca":                  true,
+	"proxy":               true,
+	"https-proxy":         true,
 	// berry
 	"npmRegistryServer":       true,
 	"npmPublishRegistry":      true,
