@@ -11,36 +11,49 @@ import (
 
 // Default placeholders (replaced by backend for enterprise installation scripts).
 var (
-	CustomerID         = "{{CUSTOMER_ID}}"
-	APIEndpoint        = "{{API_ENDPOINT}}"
-	APIKey             = "{{API_KEY}}"
-	ScanFrequencyHours = "{{SCAN_FREQUENCY_HOURS}}"
-	SearchDirs         []string
-	EnableNPMScan      *bool  // nil=auto
-	EnableBrewScan     *bool  // nil=auto
-	EnablePythonScan   *bool  // nil=auto
-	ColorMode          string // "" means auto
-	OutputFormat       string // "" means default (pretty)
-	HTMLOutputFile     string // "" means not set
-	LogLevel           string // "" means default (info); one of error/warn/info/debug
-	InstallDir         string // "" means default (~/.stepsecurity); non-empty makes the agent put all its files (logs, hook errors, future state) under this directory. Bootstrap config.json itself stays at the legacy location. Per-run opt-out is the CLI flag --install-dir=. Resolution: --install-dir flag > STEPSECURITY_HOME env > this field > default — see internal/paths.
+	CustomerID          = "{{CUSTOMER_ID}}"
+	APIEndpoint         = "{{API_ENDPOINT}}"
+	APIKey              = "{{API_KEY}}" //#nosec G101 -- build-time placeholder substituted by the backend installer; the literal is not a real credential.
+	ScanFrequencyHours  = "{{SCAN_FREQUENCY_HOURS}}"
+	SearchDirs          []string
+	EnableNPMScan       *bool  // nil=auto
+	EnableBrewScan      *bool  // nil=auto
+	EnablePythonScan    *bool  // nil=auto
+	IncludeTCCProtected *bool  // nil or false = skip macOS TCC-protected dirs (default); true = walk them. The scan as a whole runs in both cases; only reads inside the TCC-protected subtrees themselves (Documents, Mail, etc.) need the agent to have Full Disk Access (PPPC or manual grant) — without that, those walks return EACCES per entry while the rest of the scan completes normally. See docs/macos-tcc-permissions.md.
+	ColorMode           string // "" means auto
+	OutputFormat        string // "" means default (pretty)
+	HTMLOutputFile      string // "" means not set
+	LogLevel            string // "" means default (info); one of error/warn/info/debug
+	InstallDir          string // "" means default (~/.stepsecurity); non-empty makes the agent put all its files (logs, hook errors, future state) under this directory. Bootstrap config.json itself stays at the legacy location. Per-run opt-out is the CLI flag --install-dir=. Resolution: --install-dir flag > STEPSECURITY_HOME env > this field > default — see internal/paths.
 )
+
+// MaxExecutionDuration is the whole-process execution-watchdog limit
+// (STEPSEC_MAX_EXECUTION_DURATION). Persisted into config.json at install time
+// so scheduler-fired runs (launchd/systemd/schtasks) — which invoke the binary
+// directly and never inherit the loader-exported env var — resolve the same
+// value the loader configured. "" means fall back to the binary's built-in
+// default (4h). Declared in its own var block (not the placeholder group
+// above) because it carries no build-time {{...}} placeholder. See
+// telemetry.ExecutionDeadline.
+var MaxExecutionDuration string
 
 // ConfigFile is the JSON structure persisted to ~/.stepsecurity/config.json.
 type ConfigFile struct {
-	CustomerID         string   `json:"customer_id,omitempty"`
-	APIEndpoint        string   `json:"api_endpoint,omitempty"`
-	APIKey             string   `json:"api_key,omitempty"`
-	ScanFrequencyHours string   `json:"scan_frequency_hours,omitempty"`
-	SearchDirs         []string `json:"search_dirs,omitempty"`
-	EnableNPMScan      *bool    `json:"enable_npm_scan,omitempty"`
-	EnableBrewScan     *bool    `json:"enable_brew_scan,omitempty"`
-	EnablePythonScan   *bool    `json:"enable_python_scan,omitempty"`
-	ColorMode          string   `json:"color_mode,omitempty"`
-	OutputFormat       string   `json:"output_format,omitempty"`
-	HTMLOutputFile     string   `json:"html_output_file,omitempty"`
-	LogLevel           string   `json:"log_level,omitempty"`
-	InstallDir         string   `json:"install_dir,omitempty"`
+	CustomerID           string   `json:"customer_id,omitempty"`
+	APIEndpoint          string   `json:"api_endpoint,omitempty"`
+	APIKey               string   `json:"api_key,omitempty"`
+	ScanFrequencyHours   string   `json:"scan_frequency_hours,omitempty"`
+	SearchDirs           []string `json:"search_dirs,omitempty"`
+	EnableNPMScan        *bool    `json:"enable_npm_scan,omitempty"`
+	EnableBrewScan       *bool    `json:"enable_brew_scan,omitempty"`
+	EnablePythonScan     *bool    `json:"enable_python_scan,omitempty"`
+	IncludeTCCProtected  *bool    `json:"include_tcc_protected,omitempty"`
+	ColorMode            string   `json:"color_mode,omitempty"`
+	OutputFormat         string   `json:"output_format,omitempty"`
+	HTMLOutputFile       string   `json:"html_output_file,omitempty"`
+	LogLevel             string   `json:"log_level,omitempty"`
+	InstallDir           string   `json:"install_dir,omitempty"`
+	MaxExecutionDuration string   `json:"max_execution_duration,omitempty"`
 }
 
 // userConfigDir returns ~/.stepsecurity — the per-user config location.
@@ -132,7 +145,7 @@ func Load() {
 		CustomerID = cfg.CustomerID
 	}
 	if cfg.APIEndpoint != "" && isPlaceholder(APIEndpoint) {
-		APIEndpoint = cfg.APIEndpoint
+		APIEndpoint = NormalizeAPIEndpoint(cfg.APIEndpoint)
 	}
 	if cfg.APIKey != "" && isPlaceholder(APIKey) {
 		APIKey = cfg.APIKey
@@ -152,6 +165,9 @@ func Load() {
 	if cfg.EnablePythonScan != nil && EnablePythonScan == nil {
 		EnablePythonScan = cfg.EnablePythonScan
 	}
+	if cfg.IncludeTCCProtected != nil && IncludeTCCProtected == nil {
+		IncludeTCCProtected = cfg.IncludeTCCProtected
+	}
 	if cfg.ColorMode != "" && ColorMode == "" {
 		ColorMode = cfg.ColorMode
 	}
@@ -166,6 +182,9 @@ func Load() {
 	}
 	if cfg.InstallDir != "" && InstallDir == "" {
 		InstallDir = cfg.InstallDir
+	}
+	if cfg.MaxExecutionDuration != "" && MaxExecutionDuration == "" {
+		MaxExecutionDuration = cfg.MaxExecutionDuration
 	}
 }
 
@@ -392,7 +411,18 @@ func loadExisting() *ConfigFile {
 	return &cfg
 }
 
+// NormalizeAPIEndpoint strips trailing slashes and surrounding whitespace
+// from an API endpoint URL. Every callsite in the agent composes URLs as
+// fmt.Sprintf("%s/v1/...", APIEndpoint, ...) — a trailing slash on the
+// configured value would compose to "//v1/..." and some gateways respond
+// with 403/500 instead of normalizing. Normalising once at the config
+// boundary keeps every consumer simple.
+func NormalizeAPIEndpoint(s string) string {
+	return strings.TrimRight(strings.TrimSpace(s), "/")
+}
+
 func save(cfg *ConfigFile) error {
+	cfg.APIEndpoint = NormalizeAPIEndpoint(cfg.APIEndpoint)
 	dir := writeConfigDir()
 
 	// File-mode bits below ARE meaningful on POSIX (per-user community installs
@@ -625,4 +655,25 @@ func RunConfigureNonInteractive(opts NonInteractiveOptions) error {
 
 	fmt.Printf("Configuration saved to %s\n", WriteConfigFilePath())
 	return nil
+}
+
+// PersistMaxExecutionDuration records the STEPSEC_MAX_EXECUTION_DURATION value
+// the loader exported into config.json at install time. Scheduler-fired runs
+// (launchd/systemd/schtasks) invoke the binary directly and never inherit the
+// loader's exported env var, so without this they fall back to the built-in 4h
+// default regardless of the loader's MAX_EXECUTION_DURATION_HOURS. Persisting
+// it lets telemetry.ExecutionDeadline pick it up on every scheduled run.
+// Read-modify-write so the loader-written customer_id/api_key/etc. survive.
+// No-op when value is empty (a direct binary install with no loader-configured
+// value keeps the built-in default).
+func PersistMaxExecutionDuration(value string) error {
+	if value == "" {
+		return nil
+	}
+	existing := loadExisting()
+	if existing.MaxExecutionDuration == value {
+		return nil
+	}
+	existing.MaxExecutionDuration = value
+	return save(existing)
 }

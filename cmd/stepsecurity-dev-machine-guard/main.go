@@ -20,6 +20,7 @@ import (
 	"github.com/step-security/dev-machine-guard/internal/detector/configaudit"
 	"github.com/step-security/dev-machine-guard/internal/device"
 	"github.com/step-security/dev-machine-guard/internal/executor"
+	"github.com/step-security/dev-machine-guard/internal/featuregate"
 	"github.com/step-security/dev-machine-guard/internal/launchd"
 	"github.com/step-security/dev-machine-guard/internal/output"
 	"github.com/step-security/dev-machine-guard/internal/paths"
@@ -29,6 +30,7 @@ import (
 	"github.com/step-security/dev-machine-guard/internal/schtasks"
 	"github.com/step-security/dev-machine-guard/internal/systemd"
 	"github.com/step-security/dev-machine-guard/internal/telemetry"
+	"github.com/step-security/dev-machine-guard/internal/winproc"
 )
 
 // hookReconcileTimeout caps the entire reconcile step (fetch + cache
@@ -47,6 +49,12 @@ func main() {
 	// minimal config.Load (just enough for the upload gate) so this branch
 	// stays free of the rest of main's setup work.
 	if len(os.Args) >= 2 && os.Args[1] == "_hook" {
+		// Gated: silently no-op so any pre-existing hook entry that points
+		// at this binary stays harmless until the feature ships. Override
+		// flows in via STEPSECURITY_OVERRIDE_GATE since Parse hasn't run.
+		if !featuregate.IsEnabled(featuregate.FeatureAIAgentHooks) {
+			os.Exit(0)
+		}
 		os.Exit(aiagentscli.RunHook(os.Stdin, os.Stdout, os.Stderr, os.Args[2:]))
 	}
 
@@ -57,6 +65,10 @@ func main() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %s\n", err)
 		os.Exit(1)
+	}
+
+	if cfg.OverrideGate {
+		featuregate.EnableOverride()
 	}
 
 	// Apply saved config values if CLI didn't explicitly override them.
@@ -72,6 +84,9 @@ func main() {
 	}
 	if cfg.EnablePythonScan == nil && config.EnablePythonScan != nil {
 		cfg.EnablePythonScan = config.EnablePythonScan
+	}
+	if cfg.IncludeTCCProtected == nil && config.IncludeTCCProtected != nil {
+		cfg.IncludeTCCProtected = config.IncludeTCCProtected
 	}
 	if cfg.ColorMode == "auto" && config.ColorMode != "" {
 		cfg.ColorMode = config.ColorMode
@@ -89,24 +104,32 @@ func main() {
 	exec := executor.NewReal()
 
 	// Install dir resolution (see internal/paths.Home for the canonical
-	// chain): --install-dir CLI flag > $STEPSECURITY_HOME env var >
-	// install_dir config field > ~/.stepsecurity default. The CLI flag
-	// wins because it is the most explicit per-invocation override the
-	// operator can supply. We feed it to paths via SetOverride; an
-	// explicit `--install-dir=` (empty) is preserved and short-circuits
-	// the path computation below to disable file logging for this run.
+	// chain): --install-dir CLI flag > install_dir config field >
+	// $STEPSECURITY_HOME env var > ~/.stepsecurity default. Config beats
+	// env because config.json is the source of truth that the loader
+	// scripts write to and operators hand-edit; the env var baked into
+	// service unit files at install time can otherwise become stale.
+	// An explicit `--install-dir=` (empty) routes through SetDisabled,
+	// after which paths.Home() returns "" so EVERY on-disk consumer
+	// (filelog, ai-agent hook errors, any future file) uniformly skips
+	// — not just file logging. cli.Parse rejects the empty form when
+	// paired with `install` / `uninstall`, where the platform installers
+	// need a real on-disk path for unit files and the log directory.
 	//
 	// The capture is installed before the logger so every subsequent
 	// stderr write — including the pipe-tee in
 	// internal/telemetry/logcapture.go, which nests inside this one —
 	// flows through to disk.
 	if cfg.InstallDirSet {
-		paths.SetOverride(cfg.InstallDir) // may be "" = disabled
+		if cfg.InstallDir == "" {
+			paths.SetDisabled()
+		} else {
+			paths.SetOverride(cfg.InstallDir)
+		}
 	}
-	installDir := paths.Home()
-	disabled := cfg.InstallDirSet && cfg.InstallDir == ""
+	installDir := paths.Home() // "" when SetDisabled or home unresolved
 	logFilePath := ""
-	if !disabled && installDir != "" {
+	if installDir != "" {
 		logFilePath = filepath.Join(installDir, filelog.Filename)
 		// Pre-rotate BOTH files unconditionally. In interactive mode the
 		// stderr rotation is redundant with filelog.Start's own rotation
@@ -153,7 +176,7 @@ func main() {
 	// auto-move — too risky for v1 (silent overwrites, races with other
 	// processes, perms changes). Just point at the leftovers.
 	legacy := paths.LegacyHome()
-	if !disabled && legacy != "" && installDir != "" && installDir != legacy {
+	if legacy != "" && installDir != "" && installDir != legacy {
 		if leftovers := findLegacyLeftovers(legacy); len(leftovers) > 0 {
 			log.Warn("install dir is %s but the legacy default %s still has files: %s — copy them over manually if you want their history.",
 				installDir, legacy, strings.Join(leftovers, ", "))
@@ -210,6 +233,7 @@ func main() {
 			log.Error("Enterprise configuration not found. Run '%s configure' or download the script from your StepSecurity dashboard.", os.Args[0])
 			os.Exit(1)
 		}
+		armExecutionWatchdog(telemetry.ExecutionDeadline(config.MaxExecutionDuration), log)
 		if err := telemetry.Run(exec, log, cfg); err != nil {
 			log.Error("%v", err)
 			os.Exit(1)
@@ -242,8 +266,37 @@ func main() {
 			log.Error("Scheduled installation is not supported on %s", runtime.GOOS)
 			os.Exit(1)
 		}
+
+		// Persist the loader-exported max-execution duration into config.json so
+		// scheduler-fired runs (launchd/systemd/schtasks) — which invoke the
+		// binary directly and never inherit the loader's exported env var — arm
+		// the watchdog with the same value. Best-effort: a write failure just
+		// means scheduled runs fall back to the binary's built-in default.
+		if err := config.PersistMaxExecutionDuration(os.Getenv(telemetry.EnvMaxExecutionDuration)); err != nil {
+			log.Warn("failed to persist max execution duration to config (%v) — scheduled runs will use the built-in default", err)
+		}
+
+		// MSI deferred custom actions run as NT AUTHORITY\SYSTEM. A scan
+		// from that context sees SYSTEM's profile (no IDEs, no AI agents,
+		// no user dotfiles) and ships a near-empty payload as the first
+		// data point — the symptom customers reported as "first run is
+		// empty, subsequent runs are correct." Instead of scanning inline,
+		// ask the scheduler to fire the just-registered task, which is
+		// bound to /ru INTERACTIVE and runs under the logged-in user.
+		// If no one is logged in (unattended SCCM deploys), the trigger
+		// silently no-ops and the task fires on its next hourly tick;
+		// either way, no SYSTEM-context telemetry ever ships.
+		if runtime.GOOS == "windows" && winproc.IsLocalSystem() {
+			if err := schtasks.RunNow(exec, log); err != nil {
+				log.Warn("could not trigger initial scan (%v) — the scheduled task will fire on its next interval", err)
+			}
+			runHookStateReconcile(exec, log)
+			return
+		}
+
 		log.Progress("Sending initial telemetry...")
 		fmt.Println()
+		armExecutionWatchdog(telemetry.ExecutionDeadline(config.MaxExecutionDuration), log)
 		telemetryErr := telemetry.Run(exec, log, cfg)
 
 		// On Linux, systemd.Install enabled the timer but did not start it.
@@ -298,15 +351,27 @@ func main() {
 		}
 
 	case "hooks install":
+		if !featuregate.IsEnabled(featuregate.FeatureAIAgentHooks) {
+			fmt.Fprintln(os.Stderr, featuregate.UnavailableMessage("hooks install"))
+			os.Exit(1)
+		}
 		os.Exit(aiagentscli.RunInstall(context.Background(), exec, cfg.HooksAgent, os.Stdout, os.Stderr))
 
 	case "hooks uninstall":
+		if !featuregate.IsEnabled(featuregate.FeatureAIAgentHooks) {
+			fmt.Fprintln(os.Stderr, featuregate.UnavailableMessage("hooks uninstall"))
+			os.Exit(1)
+		}
 		os.Exit(aiagentscli.RunUninstall(context.Background(), exec, cfg.HooksAgent, os.Stdout, os.Stderr))
 
 	default:
 		// --npmrc and --pipconfig: focused, verbose pretty audits that
 		// bypass everything else for a fast (~1s) deep dive.
 		if cfg.NPMRCOnly {
+			if !featuregate.IsEnabled(featuregate.FeatureNPMRCAudit) {
+				fmt.Fprintln(os.Stderr, featuregate.UnavailableMessage("--npmrc"))
+				os.Exit(1)
+			}
 			if err := runNPMRCOnly(exec, cfg); err != nil {
 				log.Error("%v", err)
 				os.Exit(1)
@@ -314,6 +379,10 @@ func main() {
 			return
 		}
 		if cfg.PipConfigOnly {
+			if !featuregate.IsEnabled(featuregate.FeaturePipConfigAudit) {
+				fmt.Fprintln(os.Stderr, featuregate.UnavailableMessage("--pipconfig"))
+				os.Exit(1)
+			}
 			if err := runPipConfigOnly(exec, cfg); err != nil {
 				log.Error("%v", err)
 				os.Exit(1)
@@ -331,6 +400,7 @@ func main() {
 			}
 		case config.IsEnterpriseMode():
 			log.Debug("dispatch: enterprise telemetry (auto-detected)")
+			armExecutionWatchdog(telemetry.ExecutionDeadline(config.MaxExecutionDuration), log)
 			if err := telemetry.Run(exec, log, cfg); err != nil {
 				log.Error("%v", err)
 				os.Exit(1)
@@ -432,6 +502,10 @@ func findLegacyLeftovers(legacy string) []string {
 // in community mode (enterprise config missing) — the existing scan
 // path stays unaffected. Failures are logged but never crash main.
 func runHookStateReconcile(exec executor.Executor, log *progress.Logger) {
+	if !featuregate.IsEnabled(featuregate.FeatureAIAgentHooks) {
+		log.Debug("hook-state reconcile: skipped (feature gated)")
+		return
+	}
 	cfg, ok := ingest.Snapshot()
 	if !ok {
 		log.Debug("hook-state reconcile: skipped (no enterprise config)")
