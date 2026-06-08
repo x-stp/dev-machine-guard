@@ -75,6 +75,7 @@ type Payload struct {
 	MCPConfigs           []model.MCPConfigEnterprise     `json:"mcp_configs"`
 	NPMRCAudit           *model.NPMRCAudit               `json:"npmrc_audit,omitempty"`
 	PipAudit             *model.PipAudit                 `json:"pip_audit,omitempty"`
+	PnpmAudit            *model.PnpmAudit                `json:"pnpm_audit,omitempty"`
 
 	ExecutionLogs      *ExecutionLogs      `json:"execution_logs,omitempty"`
 	PerformanceMetrics *PerformanceMetrics `json:"performance_metrics,omitempty"`
@@ -785,6 +786,11 @@ func Run(exec executor.Executor, log *progress.Logger, cfg *cli.Config) (err err
 	log.Progress("  pip available: %v, files discovered: %d, findings: %d", pipAudit.Available, len(pipAudit.Files), len(pipAudit.Findings))
 	fmt.Fprintln(os.Stderr)
 
+	log.Progress("Auditing pnpm configuration...")
+	pnpmAudit := configaudit.NewPnpmDetector(userExec).WithSkipper(tccSkipper).Detect(ctx, searchDirs, npmrcLoggedIn)
+	log.Progress("  pnpm available: %v, files discovered: %d", pnpmAudit.Available, len(pnpmAudit.Files))
+	fmt.Fprintln(os.Stderr)
+
 	// Snapshot execution logs for the payload WITHOUT stopping capture, so the
 	// upload that follows (and the completion lines) keep being recorded and
 	// can ship in the final run-status log tail via postPhaseFinal below. The
@@ -834,6 +840,7 @@ func Run(exec executor.Executor, log *progress.Logger, cfg *cli.Config) (err err
 		MCPConfigs:           mcpConfigs,
 		NPMRCAudit:           &npmrcAudit,
 		PipAudit:             &pipAudit,
+		PnpmAudit:            &pnpmAudit,
 
 		ExecutionLogs: &ExecutionLogs{
 			OutputBase64: execLogsBase64,

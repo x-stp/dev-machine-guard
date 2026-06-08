@@ -246,6 +246,16 @@ func Run(exec executor.Executor, log *progress.Logger, cfg *cli.Config) error {
 		log.StepDone(time.Since(start))
 	}
 
+	// pnpm config audit — same .npmrc file shape as npm with pnpm-specific
+	// effective view and env vars.
+	var pnpmAudit model.PnpmAudit
+	if featuregate.IsEnabled(featuregate.FeaturePnpmConfigAudit) {
+		log.StepStart("Auditing pnpm configuration")
+		start = time.Now()
+		pnpmAudit = configaudit.NewPnpmDetector(exec).WithSkipper(tccSkipper).Detect(ctx, searchDirs, loggedInUser)
+		log.StepDone(time.Since(start))
+	}
+
 	// Ensure no nil slices (JSON must emit [] not null)
 	if aiTools == nil {
 		aiTools = []model.AITool{}
@@ -316,6 +326,7 @@ func Run(exec executor.Executor, log *progress.Logger, cfg *cli.Config) error {
 		FlatpakPackages:   flatpakPackages,
 		NPMRCAudit:        &npmrcAudit,
 		PipAudit:          &pipAudit,
+		PnpmAudit:         &pnpmAudit,
 		Summary: model.Summary{
 			AIAgentsAndToolsCount: len(aiTools),
 			IDEInstallationsCount: len(ides),

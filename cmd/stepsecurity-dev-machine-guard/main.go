@@ -389,6 +389,17 @@ func main() {
 			}
 			return
 		}
+		if cfg.PnpmRCOnly {
+			if !featuregate.IsEnabled(featuregate.FeaturePnpmConfigAudit) {
+				fmt.Fprintln(os.Stderr, featuregate.UnavailableMessage("--pnpmrc"))
+				os.Exit(1)
+			}
+			if err := runPnpmRCOnly(exec, cfg); err != nil {
+				log.Error("%v", err)
+				os.Exit(1)
+			}
+			return
+		}
 		// Community mode or auto-detect enterprise
 		switch {
 		case cfg.OutputFormatSet || cfg.HTMLOutputFile != "":
@@ -447,6 +458,23 @@ func runPipConfigOnly(exec executor.Executor, cfg *cli.Config) error {
 		return scanJSONEncoder(os.Stdout).Encode(audit)
 	}
 	output.PrettyPipConfig(os.Stdout, &audit, dev, cfg.ColorMode)
+	return nil
+}
+
+// runPnpmRCOnly executes only the pnpm detector and renders the verbose
+// pretty view (or JSON when --json is also passed).
+func runPnpmRCOnly(exec executor.Executor, cfg *cli.Config) error {
+	ctx := context.Background()
+	dev := device.Gather(ctx, exec)
+	loggedInUser, _ := exec.LoggedInUser()
+
+	searchDirs := resolveScanSearchDirs(exec, cfg.SearchDirs)
+	audit := configaudit.NewPnpmDetector(exec).Detect(ctx, searchDirs, loggedInUser)
+
+	if cfg.OutputFormat == "json" {
+		return scanJSONEncoder(os.Stdout).Encode(audit)
+	}
+	output.PrettyPnpm(os.Stdout, &audit, dev, cfg.ColorMode)
 	return nil
 }
 

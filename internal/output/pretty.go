@@ -281,7 +281,31 @@ func Pretty(w io.Writer, result *model.ScanResult, colorMode string) error {
 		printPipAuditSummary(w, c, result.PipAudit)
 	}
 
+	// PNPM CONFIG AUDIT (compact summary; deep view via --pnpmrc)
+	if result.PnpmAudit != nil {
+		printPnpmAuditSummary(w, c, result.PnpmAudit)
+	}
+
 	return nil
+}
+
+//nolint:errcheck // terminal output
+func printPnpmAuditSummary(w io.Writer, c *colors, a *model.PnpmAudit) {
+	fmt.Fprintf(w, "  %s%sPNPM CONFIG AUDIT%s\n", c.purple, c.bold, c.reset)
+	if a.Available {
+		fmt.Fprintf(w, "    %spnpm:%s %s @ %s\n", c.dim, c.reset, a.PnpmVersion, a.PnpmPath)
+	} else {
+		fmt.Fprintf(w, "    %spnpm:%s not found in PATH\n", c.dim, c.reset)
+	}
+	existing := 0
+	for _, f := range a.Files {
+		if f.Exists {
+			existing++
+		}
+	}
+	fmt.Fprintf(w, "    %sfiles:%s %d discovered, %d present\n", c.dim, c.reset, len(a.Files), existing)
+	fmt.Fprintf(w, "    %srun --pnpmrc for the deep view%s\n", c.dim, c.reset)
+	fmt.Fprintln(w)
 }
 
 //nolint:errcheck // terminal output

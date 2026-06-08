@@ -28,6 +28,7 @@ type ScanResult struct {
 	FlatpakPackages   []SystemPackage `json:"flatpak_packages"`
 	NPMRCAudit        *NPMRCAudit     `json:"npmrc_audit,omitempty"`
 	PipAudit          *PipAudit       `json:"pip_audit,omitempty"`
+	PnpmAudit         *PnpmAudit      `json:"pnpm_audit,omitempty"`
 	Summary           Summary         `json:"summary"`
 }
 
@@ -321,6 +322,31 @@ type NPMRCEnvVar struct {
 	Set          bool   `json:"set"`
 	DisplayValue string `json:"display_value,omitempty"`
 	ValueSHA256  string `json:"value_sha256,omitempty"`
+}
+
+// PnpmAudit is the top-level structure produced by the pnpm detector. The
+// file model is reused verbatim from npm — pnpm reads the same .npmrc syntax
+// across the same scope layering. The effective view, env vars, and binary
+// metadata are pnpm-specific.
+type PnpmAudit struct {
+	Available      bool           `json:"pnpm_available"`
+	PnpmVersion    string         `json:"pnpm_version,omitempty"`
+	PnpmPath       string         `json:"pnpm_path,omitempty"`
+	Files          []NPMRCFile    `json:"files"`
+	Effective      *PnpmEffective `json:"effective,omitempty"`
+	Env            []NPMRCEnvVar  `json:"env"`
+	DiscoveryError string         `json:"discovery_error,omitempty"`
+}
+
+// PnpmEffective mirrors the merged-config view emitted by
+// `pnpm config list --json`. pnpm doesn't print source attribution comments
+// the way `npm config ls -l` does, so SourceByKey is typically empty —
+// retained on the struct so consumers can share rendering code with the
+// npm view.
+type PnpmEffective struct {
+	SourceByKey map[string]string `json:"source_by_key,omitempty"`
+	Config      map[string]any    `json:"config,omitempty"`
+	Error       string            `json:"error,omitempty"`
 }
 
 // --- pip configuration audit -------------------------------------------------
