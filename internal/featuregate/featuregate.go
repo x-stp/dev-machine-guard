@@ -22,6 +22,7 @@ const (
 	FeaturePipConfigAudit  Feature = "pipconfig-audit"
 	FeaturePnpmConfigAudit Feature = "pnpm-config-audit"
 	FeatureBunConfigAudit  Feature = "bun-config-audit"
+	FeatureYarnConfigAudit Feature = "yarn-config-audit"
 )
 
 // enabled lists features safe to ship today. Uncomment a line once its
@@ -32,6 +33,7 @@ var enabled = map[Feature]bool{
 	FeaturePipConfigAudit:  true,
 	// FeaturePnpmConfigAudit: true,
 	// FeatureBunConfigAudit:  true,
+	// FeatureYarnConfigAudit: true,
 }
 
 var override bool

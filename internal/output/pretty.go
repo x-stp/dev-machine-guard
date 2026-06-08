@@ -291,7 +291,43 @@ func Pretty(w io.Writer, result *model.ScanResult, colorMode string) error {
 		printBunAuditSummary(w, c, result.BunAudit)
 	}
 
+	// YARN CONFIG AUDIT (compact summary; deep view via --yarnrc)
+	if result.YarnAudit != nil {
+		printYarnAuditSummary(w, c, result.YarnAudit)
+	}
+
 	return nil
+}
+
+//nolint:errcheck // terminal output
+func printYarnAuditSummary(w io.Writer, c *colors, a *model.YarnAudit) {
+	fmt.Fprintf(w, "  %s%sYARN CONFIG AUDIT%s\n", c.purple, c.bold, c.reset)
+	if a.Available {
+		flavor := a.Flavor
+		if flavor == "" {
+			flavor = "unknown"
+		}
+		fmt.Fprintf(w, "    %syarn:%s %s (%s) @ %s\n", c.dim, c.reset, a.YarnVersion, flavor, a.YarnPath)
+	} else {
+		fmt.Fprintf(w, "    %syarn:%s not found in PATH\n", c.dim, c.reset)
+	}
+	existing := 0
+	classic, berry := 0, 0
+	for _, f := range a.Files {
+		if f.Exists {
+			existing++
+		}
+		switch f.Flavor {
+		case "berry":
+			berry++
+		case "classic":
+			classic++
+		}
+	}
+	fmt.Fprintf(w, "    %sfiles:%s %d discovered (%d classic / %d berry), %d present  (+%d .npmrc side-channel)\n",
+		c.dim, c.reset, len(a.Files), classic, berry, existing, len(a.NPMRCFiles))
+	fmt.Fprintf(w, "    %srun --yarnrc for the deep view%s\n", c.dim, c.reset)
+	fmt.Fprintln(w)
 }
 
 //nolint:errcheck // terminal output

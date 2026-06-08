@@ -411,6 +411,17 @@ func main() {
 			}
 			return
 		}
+		if cfg.YarnRCOnly {
+			if !featuregate.IsEnabled(featuregate.FeatureYarnConfigAudit) {
+				fmt.Fprintln(os.Stderr, featuregate.UnavailableMessage("--yarnrc"))
+				os.Exit(1)
+			}
+			if err := runYarnRCOnly(exec, cfg); err != nil {
+				log.Error("%v", err)
+				os.Exit(1)
+			}
+			return
+		}
 		// Community mode or auto-detect enterprise
 		switch {
 		case cfg.OutputFormatSet || cfg.HTMLOutputFile != "":
@@ -503,6 +514,24 @@ func runBunfigOnly(exec executor.Executor, cfg *cli.Config) error {
 		return scanJSONEncoder(os.Stdout).Encode(audit)
 	}
 	output.PrettyBun(os.Stdout, &audit, dev, cfg.ColorMode)
+	return nil
+}
+
+// runYarnRCOnly executes only the yarn detector (covering both .yarnrc and
+// .yarnrc.yml) and renders the verbose pretty view (or JSON when --json is
+// also passed).
+func runYarnRCOnly(exec executor.Executor, cfg *cli.Config) error {
+	ctx := context.Background()
+	dev := device.Gather(ctx, exec)
+	loggedInUser, _ := exec.LoggedInUser()
+
+	searchDirs := resolveScanSearchDirs(exec, cfg.SearchDirs)
+	audit := configaudit.NewYarnDetector(exec).Detect(ctx, searchDirs, loggedInUser)
+
+	if cfg.OutputFormat == "json" {
+		return scanJSONEncoder(os.Stdout).Encode(audit)
+	}
+	output.PrettyYarn(os.Stdout, &audit, dev, cfg.ColorMode)
 	return nil
 }
 

@@ -267,6 +267,16 @@ func Run(exec executor.Executor, log *progress.Logger, cfg *cli.Config) error {
 		log.StepDone(time.Since(start))
 	}
 
+	// yarn config audit — covers both v1 (.yarnrc) and v2+ (.yarnrc.yml)
+	// with auth-side-channel .npmrc files surfaced separately.
+	var yarnAudit model.YarnAudit
+	if featuregate.IsEnabled(featuregate.FeatureYarnConfigAudit) {
+		log.StepStart("Auditing yarn configuration")
+		start = time.Now()
+		yarnAudit = configaudit.NewYarnDetector(exec).WithSkipper(tccSkipper).Detect(ctx, searchDirs, loggedInUser)
+		log.StepDone(time.Since(start))
+	}
+
 	// Ensure no nil slices (JSON must emit [] not null)
 	if aiTools == nil {
 		aiTools = []model.AITool{}
@@ -339,6 +349,7 @@ func Run(exec executor.Executor, log *progress.Logger, cfg *cli.Config) error {
 		PipAudit:          &pipAudit,
 		PnpmAudit:         &pnpmAudit,
 		BunAudit:          &bunAudit,
+		YarnAudit:         &yarnAudit,
 		Summary: model.Summary{
 			AIAgentsAndToolsCount: len(aiTools),
 			IDEInstallationsCount: len(ides),

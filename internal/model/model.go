@@ -30,6 +30,7 @@ type ScanResult struct {
 	PipAudit          *PipAudit       `json:"pip_audit,omitempty"`
 	PnpmAudit         *PnpmAudit      `json:"pnpm_audit,omitempty"`
 	BunAudit          *BunAudit       `json:"bun_audit,omitempty"`
+	YarnAudit         *YarnAudit      `json:"yarn_audit,omitempty"`
 	Summary           Summary         `json:"summary"`
 }
 
@@ -397,6 +398,62 @@ type BunConfigFile struct {
 type BunSection struct {
 	Name    string       `json:"name"`
 	Entries []NPMRCEntry `json:"entries"`
+}
+
+// YarnAudit covers both yarn classic (v1.x, .yarnrc) and yarn berry (v2+,
+// .yarnrc.yml). Flavor reflects the detected yarn binary's major version;
+// per-file Flavor on YarnConfigFile reflects the file's own syntax. A
+// mismatch (e.g. a v1 binary with a project .yarnrc.yml) is itself a useful
+// signal — the renderer surfaces it.
+type YarnAudit struct {
+	Available      bool             `json:"yarn_available"`
+	YarnVersion    string           `json:"yarn_version,omitempty"`
+	YarnPath       string           `json:"yarn_path,omitempty"`
+	Flavor         string           `json:"flavor,omitempty"` // "classic" | "berry" | "unknown"
+	Files          []YarnConfigFile `json:"files"`
+	NPMRCFiles     []NPMRCFile      `json:"npmrc_files"` // auth side-channel
+	Env            []NPMRCEnvVar    `json:"env"`
+	DiscoveryError string           `json:"discovery_error,omitempty"`
+}
+
+// YarnConfigFile is a discovered .yarnrc (classic) or .yarnrc.yml (berry).
+// Flavor reflects the file's own syntax, independent of the YarnAudit
+// top-level Flavor.
+type YarnConfigFile struct {
+	Path        string      `json:"path"`
+	Scope       string      `json:"scope"`  // "user" | "project"
+	Flavor      string      `json:"flavor"` // "classic" | "berry"
+	Exists      bool        `json:"exists"`
+	Readable    bool        `json:"readable"`
+	SizeBytes   int64       `json:"size_bytes,omitempty"`
+	ModTimeUnix int64       `json:"mtime_unix,omitempty"`
+	Mode        string      `json:"mode,omitempty"`
+	OwnerUID    int         `json:"owner_uid,omitempty"`
+	OwnerName   string      `json:"owner_name,omitempty"`
+	GroupGID    int         `json:"group_gid,omitempty"`
+	GroupName   string      `json:"group_name,omitempty"`
+	SHA256      string      `json:"sha256,omitempty"`
+	SymlinkTo   string      `json:"symlink_target,omitempty"`
+	InGitRepo   bool        `json:"in_git_repo,omitempty"`
+	GitTracked  bool        `json:"git_tracked,omitempty"`
+	Entries     []YarnEntry `json:"entries,omitempty"`
+	ParseError  string      `json:"parse_error,omitempty"`
+}
+
+// YarnEntry is a single parsed key/value from either yarn flavor. Berry
+// nested maps (npmScopes / npmRegistries) flatten to dotted keys —
+// `npmScopes.@step-security.npmAuthToken`,
+// `npmRegistries.https://npm.example.com/.npmAuthToken` — so a single
+// flat slice can carry both classic and berry shapes.
+type YarnEntry struct {
+	Key          string   `json:"key"`
+	DisplayValue string   `json:"display_value"`
+	LineNum      int      `json:"line_num,omitempty"`
+	IsAuth       bool     `json:"is_auth,omitempty"`
+	IsEnvRef     bool     `json:"is_env_ref,omitempty"`
+	EnvRefVars   []string `json:"env_ref_vars,omitempty"`
+	ValueSHA256  string   `json:"value_sha256,omitempty"`
+	Quoted       bool     `json:"quoted,omitempty"`
 }
 
 // --- pip configuration audit -------------------------------------------------

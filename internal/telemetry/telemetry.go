@@ -77,6 +77,7 @@ type Payload struct {
 	PipAudit             *model.PipAudit                 `json:"pip_audit,omitempty"`
 	PnpmAudit            *model.PnpmAudit                `json:"pnpm_audit,omitempty"`
 	BunAudit             *model.BunAudit                 `json:"bun_audit,omitempty"`
+	YarnAudit            *model.YarnAudit                `json:"yarn_audit,omitempty"`
 
 	ExecutionLogs      *ExecutionLogs      `json:"execution_logs,omitempty"`
 	PerformanceMetrics *PerformanceMetrics `json:"performance_metrics,omitempty"`
@@ -797,6 +798,11 @@ func Run(exec executor.Executor, log *progress.Logger, cfg *cli.Config) (err err
 	log.Progress("  bun available: %v, files discovered: %d", bunAudit.Available, len(bunAudit.Files))
 	fmt.Fprintln(os.Stderr)
 
+	log.Progress("Auditing yarn configuration...")
+	yarnAudit := configaudit.NewYarnDetector(userExec).WithSkipper(tccSkipper).Detect(ctx, searchDirs, npmrcLoggedIn)
+	log.Progress("  yarn available: %v (flavor=%s), files discovered: %d", yarnAudit.Available, yarnAudit.Flavor, len(yarnAudit.Files))
+	fmt.Fprintln(os.Stderr)
+
 	// Snapshot execution logs for the payload WITHOUT stopping capture, so the
 	// upload that follows (and the completion lines) keep being recorded and
 	// can ship in the final run-status log tail via postPhaseFinal below. The
@@ -848,6 +854,7 @@ func Run(exec executor.Executor, log *progress.Logger, cfg *cli.Config) (err err
 		PipAudit:             &pipAudit,
 		PnpmAudit:            &pnpmAudit,
 		BunAudit:             &bunAudit,
+		YarnAudit:            &yarnAudit,
 
 		ExecutionLogs: &ExecutionLogs{
 			OutputBase64: execLogsBase64,
