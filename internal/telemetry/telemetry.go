@@ -37,10 +37,18 @@ import (
 // can shrink it; production code never mutates it.
 var s3UploadBackoffUnit = 2 * time.Second
 
+// CurrentPayloadSchemaVersion is bumped when the delta-protocol wire shape
+// changes in a way the backend cares about. 0 = legacy agent.
+const CurrentPayloadSchemaVersion = 1
+
 // Payload is the enterprise telemetry JSON structure.
 type Payload struct {
-	CustomerID     string                 `json:"customer_id"`
-	DeviceID       string                 `json:"device_id"`
+	// PayloadSchemaVersion gates the delta-protocol sibling fields below
+	// (NodeProjectsUnchanged etc.). Zero/absent = legacy snapshot, every
+	// scanned project ships its full body in NodeProjects/PythonProjects.
+	PayloadSchemaVersion int    `json:"payload_schema_version,omitempty"`
+	CustomerID           string `json:"customer_id"`
+	DeviceID             string `json:"device_id"`
 	SerialNumber   string                 `json:"serial_number"`
 	UserIdentity   string                 `json:"user_identity"`
 	Hostname       string                 `json:"hostname"`
@@ -74,6 +82,15 @@ type Payload struct {
 	PythonPkgManagers    []model.PkgManager              `json:"python_package_managers"`
 	PythonGlobalPackages []model.PythonScanResult        `json:"python_global_packages"`
 	PythonProjects       []model.ProjectInfo             `json:"python_projects"`
+	// Delta-protocol siblings (PayloadSchemaVersion >= 1). NodeProjects /
+	// NodeGlobalPackages / PythonProjects / PythonGlobalPackages above carry
+	// only the `changed` subset; everything else is here.
+	NodeProjectsUnchanged   []model.UnchangedProjectRef `json:"node_projects_unchanged,omitempty"`
+	NodeProjectsRemoved     []model.RemovedProjectRef   `json:"node_projects_removed,omitempty"`
+	NodeGlobalsUnchanged    []model.UnchangedGlobalRef  `json:"node_globals_unchanged,omitempty"`
+	PythonProjectsUnchanged []model.UnchangedProjectRef `json:"python_projects_unchanged,omitempty"`
+	PythonProjectsRemoved   []model.RemovedProjectRef   `json:"python_projects_removed,omitempty"`
+	PythonGlobalsUnchanged  []model.UnchangedGlobalRef  `json:"python_globals_unchanged,omitempty"`
 	SystemPackageScans   []model.SystemPackageScanResult `json:"system_package_scans"`
 	AIAgents             []model.AITool                  `json:"ai_agents"`
 	MCPConfigs           []model.MCPConfigEnterprise     `json:"mcp_configs"`
@@ -906,8 +923,46 @@ func Run(exec executor.Executor, log *progress.Logger, cfg *cli.Config) (err err
 	// runs after this snapshot and is intentionally not tracked as a phase.
 	finalStatusInfo := tracker.Snapshot()
 
+	// Partition this run's scan output against state. When delta is enabled
+	// (snap != nil), the payload below routes changed bodies to the legacy
+	// slots and unchanged/removed projects to the new ref slots.
+	snap := buildDeltaSnapshot(
+		scanState, scanStateFullSync,
+		nodeProjects, nodeDiscovered, pythonProjects, pythonDiscovered,
+		globalPkgs, pythonGlobalPkgs,
+	)
+	payloadNodeProjects := nodeProjects
+	payloadNodeGlobals := globalPkgs
+	payloadPythonProjects := pythonProjects
+	payloadPythonGlobals := pythonGlobalPkgs
+	schemaVersion := 0
+	var npmUnchangedRefs []model.UnchangedProjectRef
+	var npmRemovedRefs []model.RemovedProjectRef
+	var npmGlobalsUnchangedRefs []model.UnchangedGlobalRef
+	var pyUnchangedRefs []model.UnchangedProjectRef
+	var pyRemovedRefs []model.RemovedProjectRef
+	var pyGlobalsUnchangedRefs []model.UnchangedGlobalRef
+	if snap != nil {
+		schemaVersion = CurrentPayloadSchemaVersion
+		payloadNodeProjects = snap.npmChanged
+		payloadNodeGlobals = snap.npmGlobalsChanged
+		payloadPythonProjects = snap.pyChanged
+		payloadPythonGlobals = snap.pyGlobalsChanged
+		npmUnchangedRefs = snap.npmUnchanged
+		npmRemovedRefs = snap.npmRemoved
+		npmGlobalsUnchangedRefs = snap.npmGlobalsUnchanged
+		pyUnchangedRefs = snap.pyUnchanged
+		pyRemovedRefs = snap.pyRemoved
+		pyGlobalsUnchangedRefs = snap.pyGlobalsUnchanged
+		log.Debug("delta payload: npm(changed=%d unchanged=%d removed=%d globals_changed=%d globals_unchanged=%d) python(changed=%d unchanged=%d removed=%d globals_changed=%d globals_unchanged=%d) full_sync=%v",
+			len(payloadNodeProjects), len(npmUnchangedRefs), len(npmRemovedRefs), len(payloadNodeGlobals), len(npmGlobalsUnchangedRefs),
+			len(payloadPythonProjects), len(pyUnchangedRefs), len(pyRemovedRefs), len(payloadPythonGlobals), len(pyGlobalsUnchangedRefs),
+			scanStateFullSync)
+	}
+
 	// Build payload
 	payload := &Payload{
+		PayloadSchemaVersion: schemaVersion,
 		CustomerID:     config.CustomerID,
 		DeviceID:       dev.SerialNumber,
 		SerialNumber:   dev.SerialNumber,
@@ -926,15 +981,22 @@ func Run(exec executor.Executor, log *progress.Logger, cfg *cli.Config) (err err
 		IDEExtensions:        extensions,
 		IDEInstallations:     ides,
 		NodePkgManagers:      pkgManagers,
-		NodeGlobalPackages:   globalPkgs,
-		NodeProjects:         nodeProjects,
+		NodeGlobalPackages:   payloadNodeGlobals,
+		NodeProjects:         payloadNodeProjects,
 		BrewPkgManager:       brewPkgMgr,
 		BrewScans:            brewScans,
 		BrewFormulae:         brewFormulae,
 		BrewCasks:            brewCasks,
 		PythonPkgManagers:    pythonPkgManagers,
-		PythonGlobalPackages: pythonGlobalPkgs,
-		PythonProjects:       pythonProjects,
+		PythonGlobalPackages: payloadPythonGlobals,
+		PythonProjects:       payloadPythonProjects,
+
+		NodeProjectsUnchanged:   npmUnchangedRefs,
+		NodeProjectsRemoved:     npmRemovedRefs,
+		NodeGlobalsUnchanged:    npmGlobalsUnchangedRefs,
+		PythonProjectsUnchanged: pyUnchangedRefs,
+		PythonProjectsRemoved:   pyRemovedRefs,
+		PythonGlobalsUnchanged:  pyGlobalsUnchangedRefs,
 		SystemPackageScans:   systemPackageScans,
 		AIAgents:             allAI,
 		MCPConfigs:           mcpConfigs,
@@ -1002,10 +1064,12 @@ func Run(exec executor.Executor, log *progress.Logger, cfg *cli.Config) (err err
 	}
 	endPhase(phaseCtx, phaseCancel, tracker, log, "telemetry_upload")
 
-	if scanState != nil {
-		commitScanState(log, scanState, scanStatePath, executionID,
-			nodeProjects, nodeDiscovered, pythonProjects, pythonDiscovered,
-			globalPkgs, pythonGlobalPkgs, scanStateFullSync)
+	if snap != nil {
+		if err := commitDeltaSnapshot(scanState, snap, scanStatePath, executionID, buildinfo.Version); err != nil {
+			log.Warn("scan-state: save failed (%v) — next run will full-sync", err)
+		} else {
+			log.Debug("scan-state: saved %s", scanStatePath)
+		}
 	}
 
 	fmt.Fprintln(os.Stderr)
@@ -1046,91 +1110,6 @@ func decodeBase64OrRaw(s string) []byte {
 	return decoded
 }
 
-// commitScanState records the scan outcome for npm and Python projects in the
-// per-device state file. Called only after a successful S3 upload + backend
-// notify, so the file always reflects what the backend has been told about.
-//
-// `discovered` is the un-capped set of project paths found on disk; it drives
-// removed-project detection (state path absent from discovered = gone, vs.
-// absent from scanned but present in discovered = dropped by the cap).
-func commitScanState(
-	log *progress.Logger, s *state.State, path, executionID string,
-	npmResults []model.NodeScanResult, npmDiscovered []string,
-	pythonResults []model.ProjectInfo, pythonDiscovered []string,
-	npmGlobals []model.NodeScanResult, pythonGlobals []model.PythonScanResult,
-	fullSync bool,
-) {
-	npmRecords := make([]state.ScanRecord, 0, len(npmResults))
-	for _, r := range npmResults {
-		if r.ProjectPath == "" {
-			continue
-		}
-		npmRecords = append(npmRecords, state.ScanRecordFromBase64(
-			r.ProjectPath, r.PackageManager, r.PMVersion, r.RawStdoutBase64, r.ExitCode,
-		))
-	}
-
-	pythonRecords := make([]state.ScanRecord, 0, len(pythonResults))
-	for _, r := range pythonResults {
-		if r.Path == "" {
-			continue
-		}
-		// Python's lister returns nil packages on pip-list failure. Treat
-		// nil as a failed scan so the prior hash (if any) is kept for retry.
-		exitCode := 0
-		if r.Packages == nil {
-			exitCode = 1
-		}
-		pythonRecords = append(pythonRecords, state.ScanRecordFromValue(
-			r.Path, r.PackageManager, "", r.Packages, exitCode,
-		))
-	}
-
-	npmGlobalRecords := make([]state.GlobalRecord, 0, len(npmGlobals))
-	for _, r := range npmGlobals {
-		if r.PackageManager == "" {
-			continue
-		}
-		hash, _ := state.CanonicalHashJSON(decodeBase64OrRaw(r.RawStdoutBase64))
-		npmGlobalRecords = append(npmGlobalRecords, state.GlobalRecord{
-			PM: r.PackageManager, Hash: hash, ExitCode: r.ExitCode,
-		})
-	}
-	pythonGlobalRecords := make([]state.GlobalRecord, 0, len(pythonGlobals))
-	for _, r := range pythonGlobals {
-		if r.PackageManager == "" {
-			continue
-		}
-		hash, _ := state.CanonicalHashJSON(decodeBase64OrRaw(r.RawStdoutBase64))
-		pythonGlobalRecords = append(pythonGlobalRecords, state.GlobalRecord{
-			PM: r.PackageManager, Hash: hash, ExitCode: r.ExitCode,
-		})
-	}
-
-	npmChanged, npmUnchanged := s.Partition(state.EcosystemNPM, npmRecords, fullSync)
-	pyChanged, pyUnchanged := s.Partition(state.EcosystemPython, pythonRecords, fullSync)
-	npmGlobalChanged, npmGlobalUnchanged := s.PartitionGlobals(state.EcosystemNPM, npmGlobalRecords, fullSync)
-	pyGlobalChanged, pyGlobalUnchanged := s.PartitionGlobals(state.EcosystemPython, pythonGlobalRecords, fullSync)
-
-	now := time.Now()
-	_, _, npmRemoved := s.Reconcile(state.EcosystemNPM, npmDiscovered)
-	_, _, pyRemoved := s.Reconcile(state.EcosystemPython, pythonDiscovered)
-	s.MarkRemovedPending(state.EcosystemNPM, npmRemoved, now)
-	s.MarkRemovedPending(state.EcosystemPython, pyRemoved, now)
-
-	log.Debug("scan-state: partition npm(changed=%d unchanged=%d removed=%d global_changed=%d global_unchanged=%d) python(changed=%d unchanged=%d removed=%d global_changed=%d global_unchanged=%d) full_sync=%v",
-		len(npmChanged), len(npmUnchanged), len(npmRemoved), len(npmGlobalChanged), len(npmGlobalUnchanged),
-		len(pyChanged), len(pyUnchanged), len(pyRemoved), len(pyGlobalChanged), len(pyGlobalUnchanged), fullSync)
-
-	s.CommitAfterUpload(now, executionID, buildinfo.Version,
-		npmRecords, pythonRecords, npmGlobalRecords, pythonGlobalRecords, fullSync)
-
-	if err := s.Save(path); err != nil {
-		log.Warn("scan-state: save failed (%v) — next run will full-sync", err)
-		return
-	}
-	log.Debug("scan-state: saved %s", path)
-}
 
 func brewFormulaeCount(scans []model.BrewScanResult) int {
 	for _, s := range scans {
