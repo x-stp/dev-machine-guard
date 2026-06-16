@@ -49,8 +49,11 @@ type NodeScanner struct {
 	// per project; this cache collapses that to one lookup per distinct
 	// PM. A scanner is created once per telemetry run (see
 	// internal/telemetry/telemetry.go), so the cache's effective scope
-	// matches a single scan even though the map isn't reset.
-	pmAvailability map[string]error
+	// matches a single scan even though the map isn't reset. Mutex-guarded
+	// because the worker pool in scanProjectsConcurrent reads/writes this
+	// map from multiple goroutines.
+	pmAvailability   map[string]error
+	pmAvailabilityMu sync.Mutex
 }
 
 func NewNodeScanner(exec executor.Executor, log *progress.Logger, loggedInUser string) *NodeScanner {
@@ -67,9 +70,13 @@ func NewNodeScanner(exec executor.Executor, log *progress.Logger, loggedInUser s
 // the per-project loop don't pay a LookPath per project on devices that
 // have hundreds of lockfiles for a PM that isn't installed.
 func (s *NodeScanner) binaryAvailable(ctx context.Context, name string) error {
+	s.pmAvailabilityMu.Lock()
 	if err, ok := s.pmAvailability[name]; ok {
+		s.pmAvailabilityMu.Unlock()
 		return err
 	}
+	s.pmAvailabilityMu.Unlock()
+
 	err := s.checkPath(ctx, name)
 	if err != nil {
 		// Logged once per PM (cache miss). "Not on PATH" is a normal
@@ -78,7 +85,9 @@ func (s *NodeScanner) binaryAvailable(ctx context.Context, name string) error {
 		// (send the Debug header) instead of an unexplained absence.
 		s.log.Debug("%s not found in PATH (delegated=%v) — projects using it will be skipped: %v", name, s.shouldRunAsUser(), err)
 	}
+	s.pmAvailabilityMu.Lock()
 	s.pmAvailability[name] = err
+	s.pmAvailabilityMu.Unlock()
 	return err
 }
 
