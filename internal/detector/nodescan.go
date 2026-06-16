@@ -9,8 +9,10 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/step-security/dev-machine-guard/internal/buildinfo"
 	"github.com/step-security/dev-machine-guard/internal/executor"
 	"github.com/step-security/dev-machine-guard/internal/model"
 	"github.com/step-security/dev-machine-guard/internal/progress"
@@ -442,53 +444,141 @@ func (s *NodeScanner) ScanProjects(ctx context.Context, searchDirs []string, kno
 
 	projects = orderScanProjects(projects, knownLastVerified)
 
+	if len(projects) > maxNodeProjects {
+		s.log.Warn("Node project scan truncated at %d projects (total discovered: %d) — lowest-priority projects were skipped", maxNodeProjects, len(projects))
+		projects = projects[:maxNodeProjects]
+	}
+
+	results = s.scanProjectsConcurrent(ctx, projects)
+
 	maxBytes := getMaxProjectScanBytes()
 	totalSize := int64(0)
-
-	totalProjects := len(projects)
-	if totalProjects > maxNodeProjects {
-		totalProjects = maxNodeProjects
-	}
-	for i, p := range projects {
-		if i >= maxNodeProjects {
-			s.log.Progress("  Reached maximum of %d projects, stopping search", maxNodeProjects)
-			s.log.Warn("Node project scan truncated at %d projects (total discovered: %d) — oldest projects were skipped", maxNodeProjects, len(projects))
-			break
-		}
-		if totalSize > maxBytes {
-			s.log.Warn("Reached data size limit (%d bytes collected, limit: %d bytes)", totalSize, maxBytes)
-			s.log.Warn("Skipping remaining projects (prioritized by most recently modified)")
-			break
-		}
-
-		// Per-project sub-progress for the heartbeat goroutine. Surfaces
-		// to console as "current_phase_detail: project 12 of 47" so a
-		// stuck scan is visibly so, not just opaque "node_scan in progress".
-		s.emitProgress(fmt.Sprintf("project %d of %d", i+1, totalProjects))
-
-		s.log.Progress("  Found project: %s", p.dir)
-		pm := DetectProjectPM(s.exec, p.dir)
-		s.log.Progress("    Package manager: %s", pm)
-
-		r, ok := s.scanProject(ctx, p.dir, pm)
-		if !ok {
-			// PM not installed on this device — not an error, just nothing
-			// to scan. Skip without emitting a telemetry record.
-			continue
-		}
+	capped := make([]model.NodeScanResult, 0, len(results))
+	for _, r := range results {
 		resultSize := int64(len(r.RawStdoutBase64)) + int64(len(r.RawStderrBase64))
-
 		if totalSize+resultSize > maxBytes {
 			s.log.Warn("Reached data size limit (%d bytes collected, limit: %d bytes)", totalSize, maxBytes)
 			s.log.Warn("Skipping remaining projects (prioritized by most recently modified)")
 			break
 		}
-
 		totalSize += resultSize
-		results = append(results, r)
+		capped = append(capped, r)
 	}
 
-	return results, discovered
+	return capped, discovered
+}
+
+// scanProjectsConcurrent returns one NodeScanResult per project in the input
+// order. Cache hits skip the PM CLI entirely; cache misses run through a
+// bounded worker pool. Successful fresh scans are written back to the cache.
+// Projects whose PM isn't installed on the device produce no result (skipped
+// in the returned slice to match the legacy contract).
+func (s *NodeScanner) scanProjectsConcurrent(ctx context.Context, projects []projectEntry) []model.NodeScanResult {
+	cachePath := scanCacheFile(s.exec)
+	cache := loadScanCache(cachePath)
+	bypassCache := s.exec.Getenv("STEPSEC_NODE_SCAN_CACHE_BYPASS") == "1"
+	nowUnix := time.Now().Unix()
+
+	type slot struct {
+		result    model.NodeScanResult
+		pm        string
+		populated bool
+		fromCache bool
+	}
+	slots := make([]slot, len(projects))
+	missIdx := make([]int, 0, len(projects))
+
+	for i, p := range projects {
+		s.emitProgress(fmt.Sprintf("project %d of %d", i+1, len(projects)))
+		pm := DetectProjectPM(s.exec, p.dir)
+		slots[i].pm = pm
+
+		entry, ok := cache.Projects[p.dir]
+		if ok && cacheValidFor(s.exec, entry, p.dir, pm, s.agentVersion(), bypassCache) {
+			s.log.Progress("  Cached: %s (%s)", p.dir, pm)
+			slots[i].result = entry.CachedResult
+			slots[i].populated = true
+			slots[i].fromCache = true
+			continue
+		}
+		missIdx = append(missIdx, i)
+	}
+
+	if len(missIdx) > 0 {
+		jobs := make(chan int, len(missIdx))
+		var wg sync.WaitGroup
+		workers := scanWorkerCount(s.exec)
+		for range workers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for idx := range jobs {
+					p := projects[idx]
+					pm := slots[idx].pm
+					s.log.Progress("  Scanning: %s (%s)", p.dir, pm)
+					r, ok := s.scanProject(ctx, p.dir, pm)
+					if !ok {
+						continue
+					}
+					slots[idx].result = r
+					slots[idx].populated = true
+				}
+			}()
+		}
+		for _, i := range missIdx {
+			jobs <- i
+		}
+		close(jobs)
+		wg.Wait()
+	}
+
+	results := make([]model.NodeScanResult, 0, len(slots))
+	for i, sl := range slots {
+		if !sl.populated {
+			continue
+		}
+		results = append(results, sl.result)
+		if !sl.fromCache && sl.result.ExitCode == 0 {
+			cache.Projects[projects[i].dir] = scanCacheEntry{
+				PackageManager:   sl.pm,
+				LastScanUnix:     nowUnix,
+				PackageJSONMtime: mtimeOr0(s.exec, filepath.Join(projects[i].dir, "package.json")),
+				LockfileMtime:    mtimeOr0(s.exec, lockfileFor(s.exec, projects[i].dir, sl.pm)),
+				NodeModulesMtime: mtimeOr0(s.exec, filepath.Join(projects[i].dir, "node_modules")),
+				AgentVersion:     s.agentVersion(),
+				CachedResult:     sl.result,
+			}
+		}
+	}
+
+	pruneCacheToDiscovered(cache, projects)
+	if err := cache.save(cachePath); err != nil {
+		s.log.Debug("node-scan-cache: save failed (%v) — next run will re-scan everything", err)
+	}
+
+	s.log.Progress("  Scanned %d projects (%d cache hits)", len(missIdx), len(slots)-len(missIdx))
+	return results
+}
+
+// pruneCacheToDiscovered drops cache entries for projects not present in the
+// current discovery pass. Bounds the cache file at the device's current
+// project set rather than growing unboundedly across runs.
+func pruneCacheToDiscovered(cache *scanCache, projects []projectEntry) {
+	keep := make(map[string]struct{}, len(projects))
+	for _, p := range projects {
+		keep[p.dir] = struct{}{}
+	}
+	for dir := range cache.Projects {
+		if _, ok := keep[dir]; !ok {
+			delete(cache.Projects, dir)
+		}
+	}
+}
+
+// agentVersion returns the running agent's version, used as a cache key
+// guard so post-upgrade runs always re-scan.
+func (s *NodeScanner) agentVersion() string {
+	return buildinfo.Version
 }
 
 // orderScanProjects sorts discovered projects so that paths absent from
