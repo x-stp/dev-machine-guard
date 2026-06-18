@@ -152,7 +152,16 @@ func (s *State) Save(path string) error {
 		_ = os.Remove(tmpPath)
 		return err
 	}
-	return os.Rename(tmpPath, cleanedPath)
+	// Windows os.Rename fails when the destination already exists, so the
+	// second save would silently stop overwriting. POSIX rename atomically
+	// replaces, making this Remove a no-op there. Same pattern as
+	// internal/progress/filelog/filelog.go RotateIfOverCap.
+	_ = os.Remove(cleanedPath)
+	if err := os.Rename(tmpPath, cleanedPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	return nil
 }
 
 // IsFullSyncDue returns true when the next upload must include every

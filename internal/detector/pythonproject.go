@@ -96,9 +96,11 @@ func (d *PythonProjectDetector) ListProjects(searchDirs []string, knownLastVerif
 }
 
 // orderVenvs prioritises never-seen venvs (mtime desc) before known venvs
-// (LastVerifiedAt asc). A nil/empty map preserves discovery order.
+// (LastVerifiedAt asc). A nil map (no state at all) preserves discovery order;
+// an empty map means state exists but has no Python entries yet, so every
+// candidate is unknown and still gets sorted by mtime desc.
 func orderVenvs(candidates []venvCandidate, knownLastVerified map[string]time.Time) []venvCandidate {
-	if len(knownLastVerified) == 0 {
+	if knownLastVerified == nil {
 		return candidates
 	}
 	unknown := make([]venvCandidate, 0, len(candidates))
