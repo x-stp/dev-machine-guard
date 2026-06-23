@@ -245,7 +245,7 @@ func main() {
 		// Stamp the local heartbeat first — before the enterprise gate and
 		// the singleton lock inside telemetry.Run — so even runs that bail at
 		// the gate or die during startup leave an on-disk "I started" record.
-		writeHeartbeat("send-telemetry", log)
+		writeHeartbeat(exec, "send-telemetry", log)
 		if !config.IsEnterpriseMode() {
 			log.Error("Enterprise configuration not found. Run '%s configure' or download the script from your StepSecurity dashboard.", os.Args[0])
 			os.Exit(1)
@@ -619,8 +619,8 @@ func findLegacyLeftovers(legacy string) []string {
 // logged at debug and never affects the run. The invocation method reuses the
 // scheduler-footprint detection telemetry already does, so the heartbeat
 // distinguishes a scheduled fire from a manual run.
-func writeHeartbeat(command string, log *progress.Logger) {
-	if err := heartbeat.Write(paths.HeartbeatFile(), command, telemetry.DetectInvocationMethod()); err != nil {
+func writeHeartbeat(exec executor.Executor, command string, log *progress.Logger) {
+	if err := heartbeat.Write(paths.HeartbeatFile(), command, telemetry.DetectInvocationMethod(exec, log)); err != nil {
 		log.Debug("heartbeat: failed to write %s: %v", paths.HeartbeatFile(), err)
 	}
 }

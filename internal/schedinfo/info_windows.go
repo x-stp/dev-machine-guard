@@ -26,6 +26,11 @@ func gather(ctx context.Context, exec executor.Executor) Info {
 	}
 
 	info.Scheduled = schtasks.IsTaskRegistered()
+	if !info.Scheduled {
+		// No task registered → skip the /query probe and return a clean "not
+		// configured" Info (Log renders it as one line).
+		return info
+	}
 
 	stdout, stderr, code, err := exec.RunWithTimeout(ctx, queryTimeout,
 		"schtasks", "/query", "/tn", schtasks.TaskName, "/v", "/fo", "LIST")

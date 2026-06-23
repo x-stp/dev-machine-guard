@@ -31,6 +31,13 @@ func gather(ctx context.Context, exec executor.Executor) Info {
 	}
 	info.UnitPath = plistPath
 	info.Scheduled = exec.FileExists(plistPath)
+	if !info.Scheduled {
+		// No plist on disk → launchd doesn't know the job, so `launchctl print`
+		// would just fail ("Could not find service", exit 113 "Bad request").
+		// Skip every probe and return a clean "not configured" Info — Log
+		// renders it as one line. (Common on manual / community runs.)
+		return info
+	}
 
 	// Parse the plist directly — it's our own well-formed XML, so reading
 	// StartInterval/RunAtLoad/ProgramArguments from disk is more robust than

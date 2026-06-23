@@ -32,6 +32,11 @@ func gather(ctx context.Context, exec executor.Executor) Info {
 	unitPath := systemd.TimerUnitPath()
 	info.UnitPath = unitPath
 	info.Scheduled = exec.FileExists(unitPath)
+	if !info.Scheduled {
+		// No timer unit on disk → skip the systemctl probe and return a clean
+		// "not configured" Info (Log renders it as one line).
+		return info
+	}
 
 	out, stderr, code, err := exec.RunWithTimeout(ctx, queryTimeout,
 		"systemctl", "--user", "list-timers", "--all", "--no-pager")

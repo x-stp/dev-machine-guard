@@ -84,7 +84,19 @@ func Log(info Info, log *progress.Logger) {
 	if manager == "" {
 		manager = "none"
 	}
-	log.Progress("  Manager: %s (footprint=%v loaded=%v management=%s)", manager, info.Scheduled, info.Loaded, info.Management)
+
+	// No scheduler footprint on disk — e.g. a manual / community run, or before
+	// install. Keep it to one line instead of a wall of "unknown" fields and a
+	// failed-probe warning (gather skips the probe in this case).
+	if !info.Scheduled {
+		log.Progress("  Scheduler: %s not configured on this device", manager)
+		for _, w := range info.Warnings {
+			log.Warn("scheduler: %s", w)
+		}
+		return
+	}
+
+	log.Progress("  Manager: %s (loaded=%v management=%s)", manager, info.Loaded, info.Management)
 
 	interval := "unknown"
 	if info.IntervalSeconds > 0 {

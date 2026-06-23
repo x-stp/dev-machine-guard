@@ -290,6 +290,12 @@ func Run(exec executor.Executor, log *progress.Logger, cfg *cli.Config) (err err
 	// short run.
 	postPhaseFinal := func() { sendSnapshot(tailEmitter.ForceAttach) }
 
+	// postPhaseInitial is the first upsert after device_info. Like postPhaseFinal
+	// it FORCES the log tail (bypassing the 2-min throttle) so the run's opening
+	// lines — loader setup, scheduler_info, device_info — reach the backend
+	// right after device_info, even on a short run or one that fails right after.
+	postPhaseInitial := func() { sendSnapshot(tailEmitter.ForceAttach) }
+
 	// Catch SIGINT / SIGTERM so cancellation (Ctrl+C, launchd stop, kill)
 	// still records a failure row and fires the Slack alert before exit.
 	// Go's default signal disposition terminates the process without running
@@ -336,6 +342,13 @@ func Run(exec executor.Executor, log *progress.Logger, cfg *cli.Config) (err err
 	// even on early returns (e.g., lock failure).
 	capture := StartCapture()
 	defer capture.Finalize()
+
+	// Fold THIS run's loader-script lines into the capture so the run-status log
+	// tail and final payload include the script's setup — binary auto-update,
+	// config write, version checks — under the same row, not just the binary's
+	// own output. The loader appends them to .loader_log; we read and then delete
+	// it, so it's scoped to the current run. Best-effort; see loader_log.go.
+	seedLoaderLog(capture)
 
 	// Bind the throttled log-tail emitter to the live capture so every
 	// subsequent postPhase() can ship a recent stderr slice attached to
@@ -447,9 +460,12 @@ func Run(exec executor.Executor, log *progress.Logger, cfg *cli.Config) (err err
 	reportRunStatus(ctx, log, executionID, deviceID, runStatusStarted, "", invocationMethod)
 
 	// First progress upsert: surfaces device_info completion immediately
-	// without waiting for the 5-minute heartbeat. Safe to call after the
+	// without waiting for the 5-minute heartbeat, and FORCE-attaches the log
+	// tail (bypassing the 2-min throttle) so the opening lines — loader setup,
+	// scheduler_info, device_info — reach the backend right after device_info,
+	// even on a short run or one that fails right after. Safe to call after the
 	// "started" post because the backend now has a row to upsert into.
-	postPhase()
+	postPhaseInitial()
 
 	// Heartbeat goroutine: pushes status_info on a ticker so a long-running
 	// phase (brew on a 200k-package macbook, syspkg on a fat dpkg machine)
