@@ -184,7 +184,8 @@ func TestConfigFile_InstallDir_JSONRoundTrip(t *testing.T) {
 }
 
 func TestConfigFile_UseLegacyPackageScan_JSONRoundTrip(t *testing.T) {
-	in := ConfigFile{UseLegacyPackageScan: true}
+	legacy := true
+	in := ConfigFile{UseLegacyPackageScan: &legacy}
 	data, err := json.Marshal(in)
 	if err != nil {
 		t.Fatal(err)
@@ -197,18 +198,29 @@ func TestConfigFile_UseLegacyPackageScan_JSONRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(data, &out); err != nil {
 		t.Fatal(err)
 	}
-	if !out.UseLegacyPackageScan {
-		t.Errorf("UseLegacyPackageScan round-trip = false, want true")
+	if out.UseLegacyPackageScan == nil || !*out.UseLegacyPackageScan {
+		t.Errorf("UseLegacyPackageScan round-trip = %v, want true", out.UseLegacyPackageScan)
 	}
 
-	// False/absent is omitted (default optimized path is the unmarked state).
+	// An explicit false must survive the round trip — it's how a config opts
+	// the (default-off) delta protocol back on.
+	enabled := false
+	data, err = json.Marshal(ConfigFile{UseLegacyPackageScan: &enabled})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(data, []byte(`"use_legacy_package_scan":false`)) {
+		t.Errorf("explicit false should serialize, not be omitted: %s", data)
+	}
+
+	// Absent (nil) is omitted — the field falls back to the package default.
 	empty := ConfigFile{}
 	data, err = json.Marshal(empty)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if bytes.Contains(data, []byte("use_legacy_package_scan")) {
-		t.Errorf("default-false should be omitted: %s", data)
+		t.Errorf("nil should be omitted: %s", data)
 	}
 }
 
@@ -234,5 +246,30 @@ func TestLoad_UseLegacyPackageScan_AppliedFromFile(t *testing.T) {
 
 	if !UseLegacyPackageScan {
 		t.Errorf("Load did not propagate use_legacy_package_scan from config.json")
+	}
+}
+
+func TestLoad_UseLegacyPackageScan_FalseReEnablesFromFile(t *testing.T) {
+	// Default is legacy-on (true). An explicit false in config.json must flip
+	// the package var back to the delta protocol.
+	prev := UseLegacyPackageScan
+	t.Cleanup(func() { UseLegacyPackageScan = prev })
+	UseLegacyPackageScan = true
+
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("STEPSECURITY_HOME", dir)
+	cfgPath := filepath.Join(dir, ".stepsecurity", "config.json")
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfgPath, []byte(`{"use_legacy_package_scan":false}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	Load()
+
+	if UseLegacyPackageScan {
+		t.Errorf("explicit use_legacy_package_scan=false did not re-enable the delta protocol")
 	}
 }
