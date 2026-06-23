@@ -387,15 +387,24 @@ func Run(exec executor.Executor, log *progress.Logger, cfg *cli.Config) (err err
 	}
 	endPhase(phaseCtx, phaseCancel, tracker, log, "device_info")
 
-	// Per-device scan state for the delta-upload protocol. Three opt-outs:
-	//   - config.UseLegacyPackageScan = true   (persistent, set in config.json)
-	//   - STEPSEC_DISABLE_SCAN_STATE=1         (env, incident response)
+	// Per-device scan state for the delta-upload protocol. Gated OFF by
+	// default (config.UseLegacyPackageScan defaults true) until the agent-api
+	// side ships. Resolution, in order:
+	//   - STEPSEC_DISABLE_SCAN_STATE=1         (env kill switch, always wins)
+	//   - STEPSEC_ENABLE_SCAN_STATE=1          (env test opt-in)
+	//   - config.UseLegacyPackageScan          (persistent, set in config.json)
 	//   - paths.Home() unresolvable            (no place to write the file)
-	// Any of the three leaves scanState nil and the run behaves as pre-1.13.
+	// A disabled gate leaves scanState nil and the run behaves as pre-1.13.
 	var scanState *state.State
 	var scanStatePath string
 	var scanStateFullSync bool
-	scanStateDisabled := config.UseLegacyPackageScan || os.Getenv("STEPSEC_DISABLE_SCAN_STATE") == "1"
+	scanStateDisabled := config.UseLegacyPackageScan
+	if os.Getenv("STEPSEC_ENABLE_SCAN_STATE") == "1" {
+		scanStateDisabled = false
+	}
+	if os.Getenv("STEPSEC_DISABLE_SCAN_STATE") == "1" {
+		scanStateDisabled = true
+	}
 	if !scanStateDisabled {
 		scanStatePath = paths.ScanStateFile()
 		if scanStatePath != "" {
