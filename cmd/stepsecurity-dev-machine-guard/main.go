@@ -310,7 +310,6 @@ func main() {
 				log.Warn("could not trigger initial scan (%v) — the scheduled task will fire on its next interval", err)
 			}
 			runHookStateReconcile(exec, log)
-			runIDEExtensionEnforce(exec, log)
 			return
 		}
 
