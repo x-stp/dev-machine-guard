@@ -399,3 +399,64 @@ func TestDecodeTaskXML_Paths(t *testing.T) {
 		})
 	}
 }
+
+// scheduleFor must keep sub-24h intervals on the unchanged HOURLY path and
+// switch 24h+ intervals to DAILY. schtasks rejects `/sc HOURLY /mo 24`
+// ("Invalid value for /MO option"), which rolled back the Coveo MSI/Intune
+// install. /mo must never fall outside a schedule's valid range (HOURLY 1-23,
+// DAILY 1-365).
+func TestScheduleFor(t *testing.T) {
+	cases := []struct {
+		hours     int
+		wantSched string
+		wantMod   string
+	}{
+		{1, "HOURLY", "1"}, // floor of the HOURLY range
+		{4, "HOURLY", "4"}, // built-in default frequency
+		{12, "HOURLY", "12"},
+		{23, "HOURLY", "23"}, // ceiling of the HOURLY range
+		{24, "DAILY", "1"},   // the Coveo case: 24h must become a daily task
+		{48, "DAILY", "2"},
+		{72, "DAILY", "3"},
+		{0, "HOURLY", "1"},       // pathological: never emit /mo 0
+		{100000, "DAILY", "365"}, // pathological: clamp to the DAILY ceiling
+	}
+	for _, c := range cases {
+		spec := scheduleFor(c.hours)
+		if !argPairPresent(spec, "/sc", c.wantSched) {
+			t.Errorf("scheduleFor(%d) = %v, want /sc %s", c.hours, spec, c.wantSched)
+		}
+		if !argPairPresent(spec, "/mo", c.wantMod) {
+			t.Errorf("scheduleFor(%d) = %v, want /mo %s", c.hours, spec, c.wantMod)
+		}
+	}
+}
+
+// The 24h+ daily switch must reach the actual schtasks /create arguments,
+// and must not disturb the admin /ru INTERACTIVE binding.
+func TestBuildCreateArgs_DailyForTwentyFourHours(t *testing.T) {
+	args := buildCreateArgs(taskName, `C:\agent.exe`, `C:\ProgramData\StepSecurity`, scheduleFor(24), true)
+	if !argPairPresent(args, "/sc", "DAILY") {
+		t.Errorf("expected /sc DAILY for 24h: %v", args)
+	}
+	if !argPairPresent(args, "/mo", "1") {
+		t.Errorf("expected /mo 1 for 24h: %v", args)
+	}
+	if !argPairPresent(args, "/ru", "INTERACTIVE") {
+		t.Errorf("expected /ru INTERACTIVE preserved on daily schedule: %v", args)
+	}
+}
+
+// Regression guard: sub-24h intervals must still emit the original
+// /sc HOURLY /mo <hours> form untouched.
+func TestBuildCreateArgs_HourlyUnchanged(t *testing.T) {
+	for _, h := range []int{1, 4, 12, 23} {
+		args := buildCreateArgs(taskName, `C:\agent.exe`, `C:\logs`, scheduleFor(h), false)
+		if !argPairPresent(args, "/sc", "HOURLY") {
+			t.Errorf("hours=%d: expected /sc HOURLY: %v", h, args)
+		}
+		if !argPairPresent(args, "/mo", strconv.Itoa(h)) {
+			t.Errorf("hours=%d: expected /mo %d: %v", h, h, args)
+		}
+	}
+}

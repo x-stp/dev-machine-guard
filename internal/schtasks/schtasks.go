@@ -97,7 +97,7 @@ func Install(exec executor.Executor, log *progress.Logger) error {
 	stepHome := logDir
 
 	taskBinary := resolveTaskBinary(exec, binaryPath)
-	hourlyArgs := buildCreateArgs(taskName, taskBinary, stepHome, []string{"/sc", "HOURLY", "/mo", strconv.Itoa(hours)}, exec.IsRoot())
+	hourlyArgs := buildCreateArgs(taskName, taskBinary, stepHome, scheduleFor(hours), exec.IsRoot())
 	log.Debug("schtasks create: task_binary=%q agent=%q install_dir=%q hours=%d is_admin=%v", taskBinary, binaryPath, stepHome, hours, exec.IsRoot())
 
 	_, stderr, exitCode, err := exec.Run(ctx, "schtasks", hourlyArgs...)
@@ -234,6 +234,27 @@ func buildCreateArgs(name, binaryPath, stepHome string, schedule []string, isAdm
 		args = append(args, "/ru", "INTERACTIVE")
 	}
 	return args
+}
+
+// scheduleFor maps a desired scan interval in hours to the schtasks schedule
+// spec (the /sc + /mo flags) for the periodic task. schtasks caps the HOURLY
+// modifier at 23: `/sc HOURLY /mo 24` is rejected with "Invalid value for /MO
+// option", which rolls back MSI/Intune installs configured with the dashboard's
+// daily "24". An interval of 24h or more is therefore emitted as a DAILY
+// schedule with the interval floored to whole days (24→1, 48→2); a remainder is
+// dropped since schtasks cannot express a mixed day+hour recurrence and MINUTE
+// itself tops out at 1439 = 23h59m. Sub-24h intervals keep the original HOURLY
+// behavior unchanged. /mo is clamped to each schedule's valid ceiling (HOURLY
+// 23, DAILY 365) and floored at 1 so no scan-frequency value can ever produce
+// an invalid /mo and fail the install.
+func scheduleFor(hours int) []string {
+	if hours >= 24 {
+		return []string{"/sc", "DAILY", "/mo", strconv.Itoa(min(hours/24, 365))}
+	}
+	if hours < 1 {
+		hours = 1
+	}
+	return []string{"/sc", "HOURLY", "/mo", strconv.Itoa(hours)}
 }
 
 func resolveLogDir(exec executor.Executor) string {
