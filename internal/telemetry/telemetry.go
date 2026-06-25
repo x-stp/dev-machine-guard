@@ -363,7 +363,14 @@ func Run(exec executor.Executor, log *progress.Logger, cfg *cli.Config) (err err
 	// Acquire lock
 	lk, err := lock.Acquire(exec)
 	if err != nil {
-		log.Debug("lock acquisition failed: %v", err)
+		// Another instance already holds the lock. Surface at info level (not
+		// Debug) so the contention is visible in agent.log, and report the
+		// failed run right here — don't wait for the deferred handler — so the
+		// backend records that this invocation contended for the lock while one
+		// was already in flight. reportFailedOnce is idempotent, so the deferred
+		// handler that also fires on the error return is a no-op.
+		log.Progress("Lock acquisition failed (PID %d): %v — another instance is already running, exiting", os.Getpid(), err)
+		reportFailedOnce(fmt.Sprintf("lock acquisition failed: %v", err))
 		return fmt.Errorf("acquiring lock: %w", err)
 	}
 	log.Debug("lock acquired (pid=%d)", os.Getpid())
