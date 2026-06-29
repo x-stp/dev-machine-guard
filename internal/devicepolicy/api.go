@@ -43,10 +43,13 @@ const maxRunConfigBytes = 4 << 20
 // extensions.allowed object as canonical JSON (sorted keys) — the exact bytes
 // the backend hashed — so the agent writes it verbatim and never re-serializes
 // (re-serialization could reorder keys and break the backend's byte-exact
-// applied==desired check). A zero EffectivePolicy (present()==false) means
-// run-config carried no directive for this category → reconciler no-op.
+// applied==desired check). Policy identity is (Category, Target); Target
+// defaults to vscode for ide_extension. A zero EffectivePolicy (present()==false)
+// means run-config carried no directive for this category/target → reconciler
+// no-op.
 type EffectivePolicy struct {
 	Category    string
+	Target      string
 	Clear       bool
 	Policy      json.RawMessage
 	Hash        string
@@ -66,15 +69,16 @@ func (ep EffectivePolicy) present() bool { return ep.Clear || len(ep.Policy) > 0
 // stays compatible.
 type policyEnvelope struct {
 	Category    string          `json:"category"`
+	Target      string          `json:"target"`
 	Clear       bool            `json:"clear"`
 	Policy      json.RawMessage `json:"policy,omitempty"`
 	Hash        string          `json:"hash,omitempty"`
 	GeneratedAt string          `json:"generated_at"`
 }
 
-// Fetcher returns the effective policy for one device + category.
+// Fetcher returns the effective policy for one device + category + target.
 type Fetcher interface {
-	Fetch(ctx context.Context, customerID, deviceID, category string) (EffectivePolicy, error)
+	Fetch(ctx context.Context, customerID, deviceID, category, target string) (EffectivePolicy, error)
 }
 
 // HTTPFetcher is the production Fetcher. Safe for concurrent use.
@@ -104,9 +108,10 @@ func NewHTTPFetcher(cfg ingest.Config, h *http.Client) (*HTTPFetcher, bool) {
 }
 
 // Fetch issues GET
-// /v1/:customer/developer-mdm-agent/run-config?device_id=…&category=…
+// /v1/:customer/developer-mdm-agent/run-config?device_id=…&category=…&target=…
 // over the existing agent auth channel (Bearer tenant key) and lifts the
-// device-policy directive from the response's `policy` sub-object. It returns a
+// device-policy directive from the response's `policy` sub-object. An empty
+// category defaults to ide_extension and an empty target to vscode. It returns a
 // parsed EffectivePolicy or an error. Any error is the reconciler's signal to
 // NO-OP (never wipe enforcement on a transient failure or malformed payload):
 //   - transport / non-200 status → error;
@@ -117,12 +122,13 @@ func NewHTTPFetcher(cfg ingest.Config, h *http.Client) (*HTTPFetcher, bool) {
 //     array written verbatim could even read back "compliant").
 //
 // An omitted/null `policy` is NOT an error: it means run-config carried no
-// directive for this category (a degraded/rules-only response, an older backend
-// not yet emitting policy, or an unknown category). Fetch returns a zero
-// EffectivePolicy (present()==false) and a nil error, and the reconciler
+// directive for this category/target (a degraded/rules-only response, an older
+// backend not yet emitting policy, or an unknown category/target). Fetch returns
+// a zero EffectivePolicy (present()==false) and a nil error, and the reconciler
 // no-ops. Unassignment is signaled by the explicit clear:true directive, never
-// by absence.
-func (c *HTTPFetcher) Fetch(ctx context.Context, customerID, deviceID, category string) (EffectivePolicy, error) {
+// by absence. A response whose `policy` omits `target` defaults to the requested
+// target.
+func (c *HTTPFetcher) Fetch(ctx context.Context, customerID, deviceID, category, target string) (EffectivePolicy, error) {
 	if c == nil {
 		return EffectivePolicy{}, errors.New("devicepolicy: nil fetcher")
 	}
@@ -135,11 +141,15 @@ func (c *HTTPFetcher) Fetch(ctx context.Context, customerID, deviceID, category 
 	if strings.TrimSpace(category) == "" {
 		category = CategoryIDEExtension
 	}
+	if strings.TrimSpace(target) == "" {
+		target = TargetVSCode
+	}
 
 	endpoint := c.endpoint +
 		"/v1/" + url.PathEscape(customerID) +
 		"/developer-mdm-agent/run-config?device_id=" + url.QueryEscape(deviceID) +
-		"&category=" + url.QueryEscape(category)
+		"&category=" + url.QueryEscape(category) +
+		"&target=" + url.QueryEscape(target)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
@@ -183,6 +193,7 @@ func (c *HTTPFetcher) Fetch(ctx context.Context, customerID, deviceID, category 
 
 	ep := EffectivePolicy{
 		Category:    strings.TrimSpace(p.Category),
+		Target:      strings.TrimSpace(p.Target),
 		Clear:       p.Clear,
 		Policy:      p.Policy,
 		Hash:        strings.TrimSpace(p.Hash),
@@ -190,6 +201,9 @@ func (c *HTTPFetcher) Fetch(ctx context.Context, customerID, deviceID, category 
 	}
 	if ep.Category == "" {
 		ep.Category = category
+	}
+	if ep.Target == "" {
+		ep.Target = target
 	}
 	if !ep.Clear {
 		if len(ep.Policy) == 0 || ep.Hash == "" {
@@ -226,6 +240,7 @@ func isJSONObject(raw json.RawMessage) bool {
 // (which gates the `compliant` verdict) can succeed.
 type ComplianceReport struct {
 	Category     string `json:"category"`
+	Target       string `json:"target"`
 	State        string `json:"state"`
 	AppliedHash  string `json:"applied_hash"`
 	AgentVersion string `json:"agent_version"`
@@ -280,6 +295,9 @@ func (c *HTTPReporter) Report(ctx context.Context, customerID, deviceID string, 
 	}
 	if r.Category == "" {
 		r.Category = CategoryIDEExtension
+	}
+	if r.Target == "" {
+		r.Target = TargetVSCode
 	}
 
 	body, err := json.Marshal(r)

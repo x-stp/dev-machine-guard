@@ -23,6 +23,7 @@ type Reconciler struct {
 	DeviceID   string
 	Platform   string // reported in compliance; e.g. "windows", "linux", "darwin"
 	Category   string // defaults to ide_extension
+	Target     string // defaults to vscode
 
 	// Probe reports whether a real MDM/admin-managed AllowedExtensions policy
 	// exists at this OS's policy location (registry / policy.json / managed
@@ -39,22 +40,22 @@ type Reconciler struct {
 
 	// writeState and clearState are test seams over the ownership store
 	// (WriteAppliedState / ClearAppliedState). nil → the real implementation.
-	writeState func(category string, s AppliedCategoryState) error
-	clearState func(category string) error
+	writeState func(category, target string, s AppliedTargetState) error
+	clearState func(category, target string) error
 }
 
-func (r *Reconciler) persistState(cat string, s AppliedCategoryState) error {
+func (r *Reconciler) persistState(cat, tgt string, s AppliedTargetState) error {
 	if r.writeState != nil {
-		return r.writeState(cat, s)
+		return r.writeState(cat, tgt, s)
 	}
-	return WriteAppliedState(cat, s)
+	return WriteAppliedState(cat, tgt, s)
 }
 
-func (r *Reconciler) dropState(cat string) error {
+func (r *Reconciler) dropState(cat, tgt string) error {
 	if r.clearState != nil {
-		return r.clearState(cat)
+		return r.clearState(cat, tgt)
 	}
-	return ClearAppliedState(cat)
+	return ClearAppliedState(cat, tgt)
 }
 
 func (r *Reconciler) now() time.Time {
@@ -77,6 +78,13 @@ func (r *Reconciler) category() string {
 	return CategoryIDEExtension
 }
 
+func (r *Reconciler) target() string {
+	if r.Target != "" {
+		return r.Target
+	}
+	return TargetVSCode
+}
+
 func (r *Reconciler) probe() (bool, string) {
 	if r.Probe != nil {
 		return r.Probe()
@@ -91,8 +99,8 @@ func (r *Reconciler) probe() (bool, string) {
 //     Enforcement on disk is never wiped on a transient or malformed response.
 //   - platform not enforceable (nil Writer) → silent no-op.
 //   - absent policy (run-config carried no `policy` directive for this
-//     category) → silent no-op; the on-disk value and ownership record stand.
-//     This is NOT a clear — removal happens only on an explicit clear directive.
+//     category/target) → silent no-op; the on-disk value and ownership record
+//     stand. This is NOT a clear — removal happens only on an explicit clear.
 //   - clear result → remove ONLY the agent-owned settings key; a value the
 //     agent has no record of writing is left untouched. No compliance report
 //     (an unassigned device is backend-derived).
@@ -103,30 +111,31 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 		return errors.New("devicepolicy: nil fetcher")
 	}
 	cat := r.category()
+	tgt := r.target()
 
-	ep, err := r.Fetcher.Fetch(ctx, r.CustomerID, r.DeviceID, cat)
+	ep, err := r.Fetcher.Fetch(ctx, r.CustomerID, r.DeviceID, cat, tgt)
 	if err != nil {
 		// Malformed/transient: do nothing. The on-disk policy (if any) stands.
 		return fmt.Errorf("devicepolicy: fetch: %w", err)
 	}
 
 	if r.Writer == nil {
-		r.logf("devicepolicy: no settings path on this platform; skipping (category=%s)", cat)
+		r.logf("devicepolicy: no settings path on this platform; skipping (category=%s target=%s)", cat, tgt)
 		return nil
 	}
 
 	if !ep.present() {
-		// Run-config carried no policy directive for this category — no value to
-		// enforce and no explicit clear. Leave the on-disk value and ownership
+		// Run-config carried no policy directive for this category/target — no value
+		// to enforce and no explicit clear. Leave the on-disk value and ownership
 		// record untouched; a transient drop must never wipe enforcement.
-		r.logf("devicepolicy: run-config carried no policy for %s; leaving on-disk state untouched", cat)
+		r.logf("devicepolicy: run-config carried no policy for %s/%s; leaving on-disk state untouched", cat, tgt)
 		return nil
 	}
 
 	if ep.Clear {
-		return r.handleClear(cat)
+		return r.handleClear(cat, tgt)
 	}
-	return r.handleEnforce(ctx, cat, ep)
+	return r.handleEnforce(ctx, cat, tgt, ep)
 }
 
 // handleClear removes the agent-owned settings key on unassignment. It clears
@@ -134,8 +143,8 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 // (ownership); a value the agent has no record of writing — the user's own
 // extensions.allowed predates enforcement, or the record was lost — is left
 // intact.
-func (r *Reconciler) handleClear(cat string) error {
-	prev, hadPrev := ReadAppliedState(cat)
+func (r *Reconciler) handleClear(cat, tgt string) error {
+	prev, hadPrev := ReadAppliedState(cat, tgt)
 	onDisk, present, err := r.Writer.Read()
 	if err != nil {
 		return fmt.Errorf("devicepolicy: clear: read %s: %w", r.Writer.Location(), err)
@@ -158,7 +167,7 @@ func (r *Reconciler) handleClear(cat string) error {
 	// record a preflight may have left after its settings write later failed.
 	// An absent entry → no-op (idempotent).
 	if hadPrev {
-		if err := r.dropState(cat); err != nil {
+		if err := r.dropState(cat, tgt); err != nil {
 			return fmt.Errorf("devicepolicy: clear: update state: %w", err)
 		}
 	}
@@ -176,7 +185,7 @@ func (r *Reconciler) handleClear(cat string) error {
 //	→ merge-write + readback
 //	→ persist ownership on every successful write (rollback if that fails)
 //	→ Verify → report (drift upgrades a would-be compliant to drift_detected)
-func (r *Reconciler) handleEnforce(ctx context.Context, cat string, ep EffectivePolicy) error {
+func (r *Reconciler) handleEnforce(ctx context.Context, cat, tgt string, ep EffectivePolicy) error {
 	// The compiled policy compacted: the canonical comparison form for
 	// readback, idempotency, and ownership. (The backend's hash still travels
 	// verbatim; only the value bytes are normalized for comparison.)
@@ -192,17 +201,17 @@ func (r *Reconciler) handleEnforce(ctx context.Context, cat string, ep Effective
 	// fight the MDM at worst. Yield and report.
 	if managed, detail := r.probe(); managed {
 		r.logf("devicepolicy: managed policy present at %s → mdm_managed (yielding)", detail)
-		return r.report(ctx, cat, StateMDMManaged, "")
+		return r.report(ctx, cat, tgt, StateMDMManaged, "")
 	}
 
 	// 2. Read the current settings value.
-	prev, hadPrev := ReadAppliedState(cat)
+	prev, hadPrev := ReadAppliedState(cat, tgt)
 	onDisk, present, err := r.Writer.Read()
 	if err != nil {
 		// Couldn't read to decide idempotency/drift → verification_failed.
 		// This includes an unsalvageable settings.json (not valid JSONC), which
 		// the writer refuses to touch.
-		_ = r.report(ctx, cat, StateVerificationFailed, "")
+		_ = r.report(ctx, cat, tgt, StateVerificationFailed, "")
 		return fmt.Errorf("devicepolicy: enforce: read %s: %w", r.Writer.Location(), err)
 	}
 
@@ -210,7 +219,7 @@ func (r *Reconciler) handleEnforce(ctx context.Context, cat string, ep Effective
 	// No write — but still report so the backend sees a fresh evaluation.
 	if present && onDisk == newValue && prev.AppliedHash == ep.Hash {
 		r.logf("devicepolicy: policy already applied (hash unchanged) — no write")
-		return r.report(ctx, cat, StateCompliant, ep.Hash)
+		return r.report(ctx, cat, tgt, StateCompliant, ep.Hash)
 	}
 
 	// 4. Drift: the agent wrote a value before, and what is on disk now is not
@@ -228,17 +237,17 @@ func (r *Reconciler) handleEnforce(ctx context.Context, cat string, ep Effective
 	// meaning-preserving writability probe.
 	probe := prev
 	if !hadPrev {
-		probe = AppliedCategoryState{FetchedAt: r.now()}
+		probe = AppliedTargetState{FetchedAt: r.now()}
 	}
-	if perr := r.persistState(cat, probe); perr != nil {
-		_ = r.report(ctx, cat, StateWriteFailed, "")
+	if perr := r.persistState(cat, tgt, probe); perr != nil {
+		_ = r.report(ctx, cat, tgt, StateWriteFailed, "")
 		return fmt.Errorf("devicepolicy: enforce: ownership state not writable, refusing to write policy: %w", perr)
 	}
 
 	// 6. Merge-write + readback.
 	rb, werr := r.Writer.Write(newValue)
 	if werr != nil {
-		_ = r.report(ctx, cat, StateWriteFailed, "")
+		_ = r.report(ctx, cat, tgt, StateWriteFailed, "")
 		return fmt.Errorf("devicepolicy: enforce: write %s: %w", r.Writer.Location(), werr)
 	}
 	readbackMatch := rb == newValue
@@ -249,7 +258,7 @@ func (r *Reconciler) handleEnforce(ctx context.Context, cat string, ep Effective
 	// the agent's own value as drift forever. Value-based ownership
 	// self-corrects: the record only takes effect when the on-disk value
 	// actually equals it.
-	if err := r.persistState(cat, AppliedCategoryState{
+	if err := r.persistState(cat, tgt, AppliedTargetState{
 		AppliedHash:  ep.Hash,
 		WrittenValue: newValue,
 		FetchedAt:    r.now(),
@@ -257,7 +266,7 @@ func (r *Reconciler) handleEnforce(ctx context.Context, cat string, ep Effective
 		// The write happened but ownership couldn't be recorded — undo it so
 		// no unrecorded value is left behind, and report a failed write.
 		r.rollbackWrite(onDisk, present)
-		_ = r.report(ctx, cat, StateWriteFailed, "")
+		_ = r.report(ctx, cat, tgt, StateWriteFailed, "")
 		return fmt.Errorf("devicepolicy: enforce: update state: %w", err)
 	}
 	r.logf("devicepolicy: wrote policy to %s (readback_match=%v)", r.Writer.Location(), readbackMatch)
@@ -276,7 +285,7 @@ func (r *Reconciler) handleEnforce(ctx context.Context, cat string, ep Effective
 	if state == StateCompliant || state == StateDriftDetected {
 		appliedHash = ep.Hash
 	}
-	return r.report(ctx, cat, state, appliedHash)
+	return r.report(ctx, cat, tgt, state, appliedHash)
 }
 
 // rollbackWrite restores the settings key to its pre-cycle condition after the
@@ -297,13 +306,14 @@ func (r *Reconciler) rollbackWrite(prevOnDisk string, prevPresent bool) {
 	}
 }
 
-func (r *Reconciler) report(ctx context.Context, cat, state, appliedHash string) error {
-	r.logf("devicepolicy: reporting state=%s category=%s", state, cat)
+func (r *Reconciler) report(ctx context.Context, cat, tgt, state, appliedHash string) error {
+	r.logf("devicepolicy: reporting state=%s category=%s target=%s", state, cat, tgt)
 	if r.Reporter == nil {
 		return nil
 	}
 	rep := ComplianceReport{
 		Category:     cat,
+		Target:       tgt,
 		State:        state,
 		AppliedHash:  appliedHash,
 		AgentVersion: AgentVersion(),

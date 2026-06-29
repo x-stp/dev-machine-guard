@@ -18,8 +18,16 @@ const (
 
 // CategoryIDEExtension is the only policy category enforced in v1. It matches
 // agent-api's CategoryIDEExtension and is the value passed as ?category= on the
-// effective-policy fetch and echoed in the compliance report.
+// run-config fetch and echoed in the compliance report.
 const CategoryIDEExtension = "ide_extension"
+
+// TargetVSCode is the only IDE target enforced in v1. Policy identity is
+// (category, target); an empty target defaults to vscode for ide_extension, so
+// future IDE families (jetbrains, …) become a new target rather than a new
+// category or a state migration. Matches agent-api's TargetVSCode and is the
+// value passed as ?target= on the run-config fetch and echoed in the compliance
+// report.
+const TargetVSCode = "vscode"
 
 // VerifyInput is the result set the verifier reasons over. It is intentionally
 // pure data: the writer performs the I/O (write + readback), so Verify itself

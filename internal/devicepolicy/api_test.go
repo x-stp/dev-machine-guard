@@ -21,6 +21,9 @@ func newFetchServer(t *testing.T, status int, body string) (*httptest.Server, *H
 		if got := r.URL.Query().Get("category"); got != CategoryIDEExtension {
 			t.Errorf("category = %q, want %q", got, CategoryIDEExtension)
 		}
+		if got := r.URL.Query().Get("target"); got != TargetVSCode {
+			t.Errorf("target = %q, want %q", got, TargetVSCode)
+		}
 		if !strings.Contains(r.URL.Path, "/developer-mdm-agent/run-config") {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
@@ -43,16 +46,19 @@ func newFetchServer(t *testing.T, status int, body string) (*httptest.Server, *H
 func TestFetchPolicy(t *testing.T) {
 	// min_vscode_version is no longer part of the contract; it stays in the
 	// fixture to prove a backend still emitting legacy fields is tolerated.
-	body := `{"detection_rules":{"version":1},"policy":{"category":"ide_extension","clear":false,` +
+	body := `{"detection_rules":{"version":1},"policy":{"category":"ide_extension","target":"vscode","clear":false,` +
 		`"policy":{"*":false,"ms-python.python":true},` +
 		`"hash":"sha256:abc","min_vscode_version":"1.96.0","generated_at":"2026-06-08T00:00:00Z"}}`
 	_, f := newFetchServer(t, 200, body)
-	ep, err := f.Fetch(context.Background(), "cust", "dev-1", CategoryIDEExtension)
+	ep, err := f.Fetch(context.Background(), "cust", "dev-1", CategoryIDEExtension, TargetVSCode)
 	if err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
 	if ep.Clear {
 		t.Fatal("clear should be false")
+	}
+	if ep.Target != TargetVSCode {
+		t.Fatalf("target = %q, want %q", ep.Target, TargetVSCode)
 	}
 	if ep.Hash != "sha256:abc" {
 		t.Fatalf("hash = %q", ep.Hash)
@@ -65,7 +71,7 @@ func TestFetchPolicy(t *testing.T) {
 
 func TestFetchClear(t *testing.T) {
 	_, f := newFetchServer(t, 200, `{"policy":{"category":"ide_extension","clear":true,"generated_at":"2026-06-08T00:00:00Z"}}`)
-	ep, err := f.Fetch(context.Background(), "cust", "dev-1", CategoryIDEExtension)
+	ep, err := f.Fetch(context.Background(), "cust", "dev-1", CategoryIDEExtension, TargetVSCode)
 	if err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
@@ -89,7 +95,7 @@ func TestFetchAbsentPolicyReturnsEmptyNoError(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			_, f := newFetchServer(t, 200, tc.body)
-			ep, err := f.Fetch(context.Background(), "cust", "dev-1", CategoryIDEExtension)
+			ep, err := f.Fetch(context.Background(), "cust", "dev-1", CategoryIDEExtension, TargetVSCode)
 			if err != nil {
 				t.Fatalf("absent policy must not error, got %v", err)
 			}
@@ -111,7 +117,7 @@ func TestFetchIgnoresDetectionRules(t *testing.T) {
 		`"policy":{"category":"ide_extension","clear":false,` +
 		`"policy":{"ms-python.python":true},"hash":"sha256:xyz","generated_at":"2026-06-08T00:00:00Z"}}`
 	_, f := newFetchServer(t, 200, body)
-	ep, err := f.Fetch(context.Background(), "cust", "dev-1", CategoryIDEExtension)
+	ep, err := f.Fetch(context.Background(), "cust", "dev-1", CategoryIDEExtension, TargetVSCode)
 	if err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
@@ -121,11 +127,30 @@ func TestFetchIgnoresDetectionRules(t *testing.T) {
 	if got := string(ep.Policy); !strings.Contains(got, `"ms-python.python":true`) {
 		t.Fatalf("policy = %s", got)
 	}
+	// The policy object omits `target`; Fetch defaults it to the requested target.
+	if ep.Target != TargetVSCode {
+		t.Fatalf("target = %q, want %q (defaulted from request)", ep.Target, TargetVSCode)
+	}
+}
+
+func TestFetchDefaultsRequestTargetToVSCode(t *testing.T) {
+	// An empty target argument must still send target=vscode on the wire
+	// (newFetchServer asserts the query param) and parse back as vscode.
+	body := `{"policy":{"category":"ide_extension","clear":false,` +
+		`"policy":{"ms-python.python":true},"hash":"sha256:abc","generated_at":"2026-06-08T00:00:00Z"}}`
+	_, f := newFetchServer(t, 200, body)
+	ep, err := f.Fetch(context.Background(), "cust", "dev-1", CategoryIDEExtension, "")
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if ep.Target != TargetVSCode {
+		t.Fatalf("target = %q, want %q (defaulted from empty request)", ep.Target, TargetVSCode)
+	}
 }
 
 func TestFetchMalformedBodyIsError(t *testing.T) {
 	_, f := newFetchServer(t, 200, `not json`)
-	if _, err := f.Fetch(context.Background(), "cust", "dev-1", CategoryIDEExtension); err == nil {
+	if _, err := f.Fetch(context.Background(), "cust", "dev-1", CategoryIDEExtension, TargetVSCode); err == nil {
 		t.Fatal("malformed body must be an error (→ reconciler no-op)")
 	}
 }
@@ -134,7 +159,7 @@ func TestFetchNonClearMissingPolicyIsError(t *testing.T) {
 	// clear=false but no policy/hash → malformed; must not be written or mistaken
 	// for a clear.
 	_, f := newFetchServer(t, 200, `{"policy":{"category":"ide_extension","clear":false,"generated_at":"x"}}`)
-	if _, err := f.Fetch(context.Background(), "cust", "dev-1", CategoryIDEExtension); err == nil {
+	if _, err := f.Fetch(context.Background(), "cust", "dev-1", CategoryIDEExtension, TargetVSCode); err == nil {
 		t.Fatal("non-clear result missing policy/hash must be an error")
 	}
 }
@@ -149,7 +174,7 @@ func TestFetchNonObjectPolicyIsError(t *testing.T) {
 		`{"policy":{"category":"ide_extension","clear":false,"policy":null,"hash":"sha256:x","generated_at":"x"}}`,
 	} {
 		_, f := newFetchServer(t, 200, body)
-		if _, err := f.Fetch(context.Background(), "cust", "dev-1", CategoryIDEExtension); err == nil {
+		if _, err := f.Fetch(context.Background(), "cust", "dev-1", CategoryIDEExtension, TargetVSCode); err == nil {
 			t.Fatalf("non-object policy must be an error, body: %s", body)
 		}
 	}
@@ -157,17 +182,17 @@ func TestFetchNonObjectPolicyIsError(t *testing.T) {
 
 func TestFetchNon200IsError(t *testing.T) {
 	_, f := newFetchServer(t, 500, `{"error":"boom"}`)
-	if _, err := f.Fetch(context.Background(), "cust", "dev-1", CategoryIDEExtension); err == nil {
+	if _, err := f.Fetch(context.Background(), "cust", "dev-1", CategoryIDEExtension, TargetVSCode); err == nil {
 		t.Fatal("5xx should propagate as error")
 	}
 }
 
 func TestFetchEmptyIDsAreErrors(t *testing.T) {
 	_, f := newFetchServer(t, 200, `{"policy":{"clear":true,"generated_at":"x"}}`)
-	if _, err := f.Fetch(context.Background(), "", "dev-1", CategoryIDEExtension); err == nil {
+	if _, err := f.Fetch(context.Background(), "", "dev-1", CategoryIDEExtension, TargetVSCode); err == nil {
 		t.Fatal("empty customer should error")
 	}
-	if _, err := f.Fetch(context.Background(), "cust", "", CategoryIDEExtension); err == nil {
+	if _, err := f.Fetch(context.Background(), "cust", "", CategoryIDEExtension, TargetVSCode); err == nil {
 		t.Fatal("empty device should error")
 	}
 }
@@ -220,6 +245,10 @@ func TestReportPostsToComplianceEndpoint(t *testing.T) {
 	}
 	if gotBody.Category != CategoryIDEExtension || gotBody.Platform != "windows" {
 		t.Fatalf("body = %+v", gotBody)
+	}
+	// Caller left Target empty → defaulted to vscode on the wire.
+	if gotBody.Target != TargetVSCode {
+		t.Fatalf("target = %q, want %q (defaulted)", gotBody.Target, TargetVSCode)
 	}
 }
 

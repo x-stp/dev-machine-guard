@@ -26,7 +26,7 @@ type fakeFetcher struct {
 	err error
 }
 
-func (f *fakeFetcher) Fetch(_ context.Context, _, _, _ string) (EffectivePolicy, error) {
+func (f *fakeFetcher) Fetch(_ context.Context, _, _, _, _ string) (EffectivePolicy, error) {
 	return f.ep, f.err
 }
 
@@ -137,12 +137,16 @@ func TestEnforceWritesCompactedPolicyAndReportsCompliant(t *testing.T) {
 	if got.State != StateCompliant {
 		t.Fatalf("state = %q, want compliant", got.State)
 	}
+	// Compliance is reported under the reconciled target.
+	if got.Target != TargetVSCode {
+		t.Fatalf("report target = %q, want %q", got.Target, TargetVSCode)
+	}
 	// applied_hash echoed verbatim (never recomputed).
 	if got.AppliedHash != "sha256:H" {
 		t.Fatalf("applied_hash = %q, want sha256:H", got.AppliedHash)
 	}
 	// Ownership recorded.
-	st, ok := ReadAppliedState(CategoryIDEExtension)
+	st, ok := ReadAppliedState(CategoryIDEExtension, TargetVSCode)
 	if !ok || st.WrittenValue != samplePolicy || st.AppliedHash != "sha256:H" {
 		t.Fatalf("cache = %+v ok=%v", st, ok)
 	}
@@ -151,7 +155,7 @@ func TestEnforceWritesCompactedPolicyAndReportsCompliant(t *testing.T) {
 func TestEnforceIdempotentSecondRunWritesNothing(t *testing.T) {
 	withTempCache(t)
 	// Seed prior ownership + on-disk value matching the desired policy.
-	if err := WriteAppliedState(CategoryIDEExtension, AppliedCategoryState{AppliedHash: "sha256:H", WrittenValue: samplePolicy}); err != nil {
+	if err := WriteAppliedState(CategoryIDEExtension, TargetVSCode, AppliedTargetState{AppliedHash: "sha256:H", WrittenValue: samplePolicy}); err != nil {
 		t.Fatal(err)
 	}
 	w := &fakeWriter{value: samplePolicy, present: true}
@@ -175,7 +179,7 @@ func TestEnforceIdempotentSecondRunWritesNothing(t *testing.T) {
 
 func TestClearRemovesAgentOwnedPolicy(t *testing.T) {
 	withTempCache(t)
-	if err := WriteAppliedState(CategoryIDEExtension, AppliedCategoryState{AppliedHash: "sha256:H", WrittenValue: samplePolicy}); err != nil {
+	if err := WriteAppliedState(CategoryIDEExtension, TargetVSCode, AppliedTargetState{AppliedHash: "sha256:H", WrittenValue: samplePolicy}); err != nil {
 		t.Fatal(err)
 	}
 	w := &fakeWriter{value: samplePolicy, present: true} // on-disk == what we wrote → owned
@@ -195,7 +199,7 @@ func TestClearRemovesAgentOwnedPolicy(t *testing.T) {
 	if len(rep.reports) != 0 {
 		t.Fatalf("clear must not report a compliance state, got %+v", rep.reports)
 	}
-	if st, _ := ReadAppliedState(CategoryIDEExtension); st.WrittenValue != "" {
+	if st, _ := ReadAppliedState(CategoryIDEExtension, TargetVSCode); st.WrittenValue != "" {
 		t.Fatalf("ownership record should be dropped, got %+v", st)
 	}
 }
@@ -204,7 +208,7 @@ func TestClearLeavesValueAgentDidNotWrite(t *testing.T) {
 	withTempCache(t)
 	// We recorded writing "mine", but on disk is "theirs" — the user (or some
 	// other tool) changed it. Unassignment must not destroy their value.
-	if err := WriteAppliedState(CategoryIDEExtension, AppliedCategoryState{WrittenValue: "mine"}); err != nil {
+	if err := WriteAppliedState(CategoryIDEExtension, TargetVSCode, AppliedTargetState{WrittenValue: "mine"}); err != nil {
 		t.Fatal(err)
 	}
 	w := &fakeWriter{value: "theirs", present: true}
@@ -295,7 +299,7 @@ func TestEnforceDriftReappliesAndReportsDriftDetected(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			withTempCache(t)
-			if err := WriteAppliedState(CategoryIDEExtension, AppliedCategoryState{AppliedHash: "sha256:H", WrittenValue: samplePolicy}); err != nil {
+			if err := WriteAppliedState(CategoryIDEExtension, TargetVSCode, AppliedTargetState{AppliedHash: "sha256:H", WrittenValue: samplePolicy}); err != nil {
 				t.Fatal(err)
 			}
 			w := &fakeWriter{value: tc.value, present: tc.present}
@@ -361,7 +365,7 @@ func TestEnforceReadbackMismatchReportsPolicyNotApplied(t *testing.T) {
 	// Ownership IS recorded even on a readback mismatch — it tracks what the
 	// agent wrote, not what it verified; next-cycle recovery depends on it
 	// (value-based ownership only takes effect if the value actually landed).
-	if st, ok := ReadAppliedState(CategoryIDEExtension); !ok || st.WrittenValue != samplePolicy {
+	if st, ok := ReadAppliedState(CategoryIDEExtension, TargetVSCode); !ok || st.WrittenValue != samplePolicy {
 		t.Fatalf("cache must record the written value even on readback mismatch, got %+v ok=%v", st, ok)
 	}
 }
@@ -445,7 +449,7 @@ func TestReconcileNoOpsWhenPolicyAbsent(t *testing.T) {
 	// This is NOT a clear: the on-disk value, ownership record, and reporter must
 	// all be left untouched. A transient policy drop must never wipe enforcement.
 	withTempCache(t)
-	if err := WriteAppliedState(CategoryIDEExtension, AppliedCategoryState{AppliedHash: "sha256:H", WrittenValue: samplePolicy}); err != nil {
+	if err := WriteAppliedState(CategoryIDEExtension, TargetVSCode, AppliedTargetState{AppliedHash: "sha256:H", WrittenValue: samplePolicy}); err != nil {
 		t.Fatal(err)
 	}
 	w := &fakeWriter{value: samplePolicy, present: true}
@@ -465,7 +469,7 @@ func TestReconcileNoOpsWhenPolicyAbsent(t *testing.T) {
 		t.Fatalf("absent policy must not report, got %+v", rep.reports)
 	}
 	// Ownership record must stand for next cycle's idempotency check.
-	if st, ok := ReadAppliedState(CategoryIDEExtension); !ok || st.WrittenValue != samplePolicy {
+	if st, ok := ReadAppliedState(CategoryIDEExtension, TargetVSCode); !ok || st.WrittenValue != samplePolicy {
 		t.Fatalf("ownership record must be untouched, got %+v ok=%v", st, ok)
 	}
 }
@@ -477,7 +481,7 @@ func TestEnforceStateUnwritablePreflightWritesNothing(t *testing.T) {
 	// of unknown origin).
 	w := &fakeWriter{}
 	r, rep := newRec(t, policyEP("sha256:H"), nil, w)
-	r.writeState = func(string, AppliedCategoryState) error { return errors.New("disk full") }
+	r.writeState = func(string, string, AppliedTargetState) error { return errors.New("disk full") }
 	if err := r.Reconcile(context.Background()); err == nil {
 		t.Fatal("unwritable ownership store should surface an error")
 	}
@@ -496,7 +500,7 @@ func TestEnforceStatePersistFailureRollsBackWrite(t *testing.T) {
 	w := &fakeWriter{}
 	r, rep := newRec(t, policyEP("sha256:H"), nil, w)
 	calls := 0
-	r.writeState = func(string, AppliedCategoryState) error {
+	r.writeState = func(string, string, AppliedTargetState) error {
 		calls++
 		if calls == 1 {
 			return nil // preflight probe
@@ -521,7 +525,7 @@ func TestEnforceStatePersistFailureRestoresPreviousOwnedValue(t *testing.T) {
 	// Same as above but a previous owned value existed: rollback restores it,
 	// keeping the (intact, atomic) old state file and the disk consistent.
 	withTempCache(t)
-	if err := WriteAppliedState(CategoryIDEExtension, AppliedCategoryState{AppliedHash: "sha256:OLD", WrittenValue: "old-value"}); err != nil {
+	if err := WriteAppliedState(CategoryIDEExtension, TargetVSCode, AppliedTargetState{AppliedHash: "sha256:OLD", WrittenValue: "old-value"}); err != nil {
 		t.Fatal(err)
 	}
 	w := &fakeWriter{value: "old-value", present: true}
@@ -532,7 +536,7 @@ func TestEnforceStatePersistFailureRestoresPreviousOwnedValue(t *testing.T) {
 		Probe: func() (bool, string) { return false, "" },
 		Now:   func() time.Time { return time.Unix(0, 0).UTC() },
 	}
-	r.writeState = func(_ string, s AppliedCategoryState) error {
+	r.writeState = func(_, _ string, s AppliedTargetState) error {
 		if s.WrittenValue == samplePolicy {
 			return errors.New("disk full") // fail only the post-write persist
 		}
@@ -557,7 +561,7 @@ func TestEnforcePolicyChangeRewrites(t *testing.T) {
 	// We own "old-value" and it is still intact on disk; the backend now sends
 	// a new policy with a new hash. This is a policy CHANGE, not drift — the
 	// report is plain compliant.
-	if err := WriteAppliedState(CategoryIDEExtension, AppliedCategoryState{AppliedHash: "sha256:OLD", WrittenValue: "old-value"}); err != nil {
+	if err := WriteAppliedState(CategoryIDEExtension, TargetVSCode, AppliedTargetState{AppliedHash: "sha256:OLD", WrittenValue: "old-value"}); err != nil {
 		t.Fatal(err)
 	}
 	w := &fakeWriter{value: "old-value", present: true}
@@ -615,5 +619,33 @@ func TestEnforceRefusesToClobberFutureSchemaStateFile(t *testing.T) {
 	}
 	if string(after) != future {
 		t.Fatalf("future-schema state file must be left byte-identical; got %q", string(after))
+	}
+}
+
+func TestReconcilePreservesSiblingTargetOwnership(t *testing.T) {
+	// A reconcile for vscode must never disturb another target's ownership record
+	// living under the same category. Seed a jetbrains sibling, run a vscode
+	// enforce, and confirm the jetbrains record stands byte-for-byte while the
+	// vscode record is freshly written. newRec sets up the temp cache, so the
+	// sibling must be seeded AFTER it (not before) to land in the same file.
+	w := &fakeWriter{}
+	r, rep := newRec(t, policyEP("sha256:H"), nil, w) // Target empty → defaults to vscode
+	jb := AppliedTargetState{AppliedHash: "sha256:JB", WrittenValue: "jetbrains-value"}
+	if err := WriteAppliedState(CategoryIDEExtension, "jetbrains", jb); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	// vscode enforced and recorded.
+	if got := lastReport(t, rep); got.Target != TargetVSCode || got.State != StateCompliant {
+		t.Fatalf("report = %+v, want vscode + compliant", got)
+	}
+	if vs, ok := ReadAppliedState(CategoryIDEExtension, TargetVSCode); !ok || vs.WrittenValue != samplePolicy {
+		t.Fatalf("vscode ownership not recorded: got %+v ok=%v", vs, ok)
+	}
+	// jetbrains sibling untouched.
+	if got, ok := ReadAppliedState(CategoryIDEExtension, "jetbrains"); !ok || got != jb {
+		t.Fatalf("sibling jetbrains ownership must survive a vscode reconcile: got %+v ok=%v", got, ok)
 	}
 }

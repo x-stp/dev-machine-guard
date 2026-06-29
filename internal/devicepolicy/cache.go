@@ -23,13 +23,18 @@ const (
 )
 
 // AppliedStateFile is the on-disk shape: a schema-versioned wrapper keyed by
-// category, so multiple enforcement categories share one file without forcing a
-// future migration. Exactly one category (ide_extension) is populated today.
+// category and then by target, so multiple categories and IDE targets share one
+// file without forcing a future migration. Exactly one pair
+// (ide_extension/vscode) is populated today.
 //
 //	{
 //	  "schema_version": 1,
 //	  "categories": {
-//	    "ide_extension": { "applied_hash": …, "written_value": …, "fetched_at": … }
+//	    "ide_extension": {
+//	      "targets": {
+//	        "vscode": { "applied_hash": …, "written_value": …, "fetched_at": … }
+//	      }
+//	    }
 //	  }
 //	}
 type AppliedStateFile struct {
@@ -37,9 +42,16 @@ type AppliedStateFile struct {
 	Categories    map[string]AppliedCategoryState `json:"categories"`
 }
 
-// AppliedCategoryState records what the agent last wrote to the user-scope VS
-// Code settings.json for one category. The category is the map key in
-// AppliedStateFile, not a field here. Two fields drive correctness:
+// AppliedCategoryState wraps the per-target ownership records for one category.
+// The category is the map key in AppliedStateFile; the target is the map key in
+// Targets. An absent category key, an absent target key, or a nil Targets map
+// all mean "the agent owns nothing on disk" for that category/target.
+type AppliedCategoryState struct {
+	Targets map[string]AppliedTargetState `json:"targets"`
+}
+
+// AppliedTargetState records what the agent last wrote to the user-scope VS
+// Code settings.json for one (category, target). Two fields drive correctness:
 //
 //   - AppliedHash is the backend's content hash, stored VERBATIM (never
 //     recomputed). Compared against the freshly-fetched hash for idempotency.
@@ -50,9 +62,9 @@ type AppliedStateFile struct {
 //     untouched); on enforce, an on-disk value differing from WrittenValue is
 //     drift and is converged back.
 //
-// An absent category key — or a zero-value entry — means "the agent owns
-// nothing on disk" for that category.
-type AppliedCategoryState struct {
+// A zero-value entry means "the agent owns nothing on disk" for that
+// category/target.
+type AppliedTargetState struct {
 	AppliedHash  string    `json:"applied_hash"`
 	WrittenValue string    `json:"written_value"`
 	FetchedAt    time.Time `json:"fetched_at"`
@@ -155,9 +167,11 @@ func readStateFile() (AppliedStateFile, readStatus) {
 		return AppliedStateFile{}, stateAbsentOrCorrupt
 	}
 	// A 0 version predates the field (or was hand-written); persistStateFile
-	// always stamps it, so a genuine file from this agent is never 0. A legacy
-	// single-object file parses here with no "categories" key → empty map →
-	// "owns nothing" for every category (one harmless re-apply, by design).
+	// always stamps it, so a genuine file from this agent is never 0. Two older
+	// shapes parse here as "owns nothing" (one harmless re-apply, by design, NOT
+	// migrated): a legacy single-object file (no "categories" key → empty map),
+	// and a pre-target category-keyed file (categories.<cat> has no "targets" key
+	// → nil Targets map → no target record).
 	if f.SchemaVersion == 0 {
 		f.SchemaVersion = CacheSchemaVersion
 	}
@@ -167,34 +181,45 @@ func readStateFile() (AppliedStateFile, readStatus) {
 	return f, stateReadable
 }
 
-// ReadAppliedState returns the agent's recorded ownership for one category:
-// (state, true) when a record exists, else (zero, false). It never surfaces an
-// error — a missing/corrupt file, or one written by a newer agent
-// (schema_version beyond this build's CacheSchemaVersion), simply means "no
-// recorded ownership". The reconciler treats that as owning nothing: safe,
-// because it then refuses to clear a value it has no record of writing and
-// re-applies the policy.
-func ReadAppliedState(category string) (AppliedCategoryState, bool) {
+// ReadAppliedState returns the agent's recorded ownership for one
+// (category, target): (state, true) when a record exists, else (zero, false).
+// An empty target defaults to vscode. It never surfaces an error — a
+// missing/corrupt file, or one written by a newer agent (schema_version beyond
+// this build's CacheSchemaVersion), simply means "no recorded ownership". The
+// reconciler treats that as owning nothing: safe, because it then refuses to
+// clear a value it has no record of writing and re-applies the policy.
+func ReadAppliedState(category, target string) (AppliedTargetState, bool) {
 	cacheMu.Lock()
 	defer cacheMu.Unlock()
 
+	if target == "" {
+		target = TargetVSCode
+	}
 	f, status := readStateFile()
 	if status != stateReadable {
-		return AppliedCategoryState{}, false
+		return AppliedTargetState{}, false
 	}
-	s, ok := f.Categories[category]
+	cat, ok := f.Categories[category]
+	if !ok {
+		return AppliedTargetState{}, false
+	}
+	s, ok := cat.Targets[target]
 	return s, ok
 }
 
-// WriteAppliedState records ownership for one category, PRESERVING every other
-// category already in the file (read-modify-write), then atomically replaces
-// the file (temp + sync + rename). It REFUSES to overwrite a file written by a
-// newer agent (errFutureSchema) rather than clobber category metadata it cannot
+// WriteAppliedState records ownership for one (category, target), PRESERVING
+// every other category AND every sibling target already in the file
+// (read-modify-write), then atomically replaces the file (temp + sync + rename).
+// An empty target defaults to vscode. It REFUSES to overwrite a file written by
+// a newer agent (errFutureSchema) rather than clobber metadata it cannot
 // interpret. A missing or corrupt file is recreated.
-func WriteAppliedState(category string, s AppliedCategoryState) error {
+func WriteAppliedState(category, target string, s AppliedTargetState) error {
 	cacheMu.Lock()
 	defer cacheMu.Unlock()
 
+	if target == "" {
+		target = TargetVSCode
+	}
 	f, status := readStateFile()
 	switch status {
 	case stateFuture:
@@ -205,18 +230,28 @@ func WriteAppliedState(category string, s AppliedCategoryState) error {
 	if f.Categories == nil {
 		f.Categories = map[string]AppliedCategoryState{}
 	}
-	f.Categories[category] = s
+	cat := f.Categories[category]
+	if cat.Targets == nil {
+		cat.Targets = map[string]AppliedTargetState{}
+	}
+	cat.Targets[target] = s
+	f.Categories[category] = cat
 	return persistStateFile(f)
 }
 
-// ClearAppliedState drops one category's ownership record, PRESERVING the rest,
-// then atomically rewrites the file. Same future-schema refusal as
-// WriteAppliedState. A missing or corrupt file — or an already-absent category
-// — is a no-op (nothing recorded to drop).
-func ClearAppliedState(category string) error {
+// ClearAppliedState drops one (category, target) ownership record, PRESERVING
+// every other category AND every sibling target, then atomically rewrites the
+// file. An empty target defaults to vscode. When the cleared target was the
+// category's last, the now-empty category is dropped too. Same future-schema
+// refusal as WriteAppliedState. A missing or corrupt file — or an already-absent
+// category/target — is a no-op (nothing recorded to drop).
+func ClearAppliedState(category, target string) error {
 	cacheMu.Lock()
 	defer cacheMu.Unlock()
 
+	if target == "" {
+		target = TargetVSCode
+	}
 	f, status := readStateFile()
 	switch status {
 	case stateFuture:
@@ -224,10 +259,19 @@ func ClearAppliedState(category string) error {
 	case stateAbsentOrCorrupt:
 		return nil
 	}
-	if _, ok := f.Categories[category]; !ok {
+	cat, ok := f.Categories[category]
+	if !ok {
 		return nil
 	}
-	delete(f.Categories, category)
+	if _, ok := cat.Targets[target]; !ok {
+		return nil
+	}
+	delete(cat.Targets, target)
+	if len(cat.Targets) == 0 {
+		delete(f.Categories, category)
+	} else {
+		f.Categories[category] = cat
+	}
 	return persistStateFile(f)
 }
 
