@@ -199,6 +199,20 @@ func (lc *LogCapture) Tail(n int) []byte {
 	return lc.ring.Tail(n)
 }
 
+// Seed writes pre-capture bytes directly into the ring buffer WITHOUT echoing
+// them to the live stderr / agent.error.log. Used to fold in the loader
+// script's earlier agent.log output so heartbeat tails and the final payload
+// include it, even though it was logged before StartCapture redirected stderr.
+// Call once, right after StartCapture and before any stderr output, so the
+// seeded bytes sit at the head of the buffer.
+func (lc *LogCapture) Seed(p []byte) {
+	lc.mu.Lock()
+	defer lc.mu.Unlock()
+	if lc.ring != nil {
+		lc.ring.Write(p)
+	}
+}
+
 func (lc *LogCapture) ringBytesLocked() []byte {
 	if lc.ring == nil {
 		return nil

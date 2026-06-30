@@ -140,3 +140,24 @@ func expandHome(s string) string {
 func LegacyHome() string {
 	return config.LegacyDir()
 }
+
+// ScanStateFile returns the absolute path to scan-state.json, or "" when
+// Home() is disabled. Callers must treat "" as "state tracking unavailable".
+func ScanStateFile() string {
+	home := Home()
+	if home == "" {
+		return ""
+	}
+	return filepath.Join(home, "scan-state.json")
+}
+
+// HeartbeatFile returns the absolute path to last-run.json, or "" when
+// Home() is disabled. Callers must treat "" as "heartbeat unavailable" and
+// skip writing it (same contract as ScanStateFile).
+func HeartbeatFile() string {
+	home := Home()
+	if home == "" {
+		return ""
+	}
+	return filepath.Join(home, "last-run.json")
+}

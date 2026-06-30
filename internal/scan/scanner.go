@@ -214,8 +214,8 @@ func Run(exec executor.Executor, log *progress.Logger, cfg *cli.Config) error {
 
 		log.StepStart("Scanning Python projects")
 		start = time.Now()
-		pyProjectDetector := detector.NewPythonProjectDetector(exec).WithSkipper(tccSkipper)
-		pythonProjects = pyProjectDetector.ListProjects(searchDirs)
+		pyProjectDetector := detector.NewPythonProjectDetector(exec).WithSkipper(tccSkipper).WithLogger(log)
+		pythonProjects, _ = pyProjectDetector.ListProjects(searchDirs, nil)
 		log.StepDone(time.Since(start))
 	} else {
 		log.StepStart("Python package scanning")

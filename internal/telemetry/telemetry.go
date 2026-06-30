@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -25,7 +26,10 @@ import (
 	"github.com/step-security/dev-machine-guard/internal/executor"
 	"github.com/step-security/dev-machine-guard/internal/lock"
 	"github.com/step-security/dev-machine-guard/internal/model"
+	"github.com/step-security/dev-machine-guard/internal/paths"
 	"github.com/step-security/dev-machine-guard/internal/progress"
+	"github.com/step-security/dev-machine-guard/internal/schedinfo"
+	"github.com/step-security/dev-machine-guard/internal/state"
 	"github.com/step-security/dev-machine-guard/internal/tcc"
 )
 
@@ -34,19 +38,27 @@ import (
 // can shrink it; production code never mutates it.
 var s3UploadBackoffUnit = 2 * time.Second
 
+// CurrentPayloadSchemaVersion is bumped when the delta-protocol wire shape
+// changes in a way the backend cares about. 0 = legacy agent.
+const CurrentPayloadSchemaVersion = 1
+
 // Payload is the enterprise telemetry JSON structure.
 type Payload struct {
-	CustomerID     string                 `json:"customer_id"`
-	DeviceID       string                 `json:"device_id"`
-	SerialNumber   string                 `json:"serial_number"`
-	UserIdentity   string                 `json:"user_identity"`
-	Hostname       string                 `json:"hostname"`
-	Platform       string                 `json:"platform"`
-	OSVersion      string                 `json:"os_version"`
-	Resources      model.MachineResources `json:"resources"`
-	AgentVersion   string                 `json:"agent_version"`
-	CollectedAt    int64                  `json:"collected_at"`
-	NoUserLoggedIn bool                   `json:"no_user_logged_in"`
+	// PayloadSchemaVersion gates the delta-protocol sibling fields below
+	// (NodeProjectsUnchanged etc.). Zero/absent = legacy snapshot, every
+	// scanned project ships its full body in NodeProjects/PythonProjects.
+	PayloadSchemaVersion int                    `json:"payload_schema_version,omitempty"`
+	CustomerID           string                 `json:"customer_id"`
+	DeviceID             string                 `json:"device_id"`
+	SerialNumber         string                 `json:"serial_number"`
+	UserIdentity         string                 `json:"user_identity"`
+	Hostname             string                 `json:"hostname"`
+	Platform             string                 `json:"platform"`
+	OSVersion            string                 `json:"os_version"`
+	Resources            model.MachineResources `json:"resources"`
+	AgentVersion         string                 `json:"agent_version"`
+	CollectedAt          int64                  `json:"collected_at"`
+	NoUserLoggedIn       bool                   `json:"no_user_logged_in"`
 
 	// InvocationMethod is "install" when the agent ran from an installed
 	// launchd/systemd/schtasks unit, "one_time" for a manual CLI run.
@@ -59,27 +71,36 @@ type Payload struct {
 	// streamed via the run-status endpoint during the run.
 	StatusInfo *RunStatusInfo `json:"status_info,omitempty"`
 
-	IDEExtensions        []model.Extension               `json:"ide_extensions"`
-	IDEInstallations     []model.IDE                     `json:"ide_installations"`
-	NodePkgManagers      []model.PkgManager              `json:"node_package_managers"`
-	NodeGlobalPackages   []model.NodeScanResult          `json:"node_global_packages"`
-	NodeProjects         []model.NodeScanResult          `json:"node_projects"`
-	BrewPkgManager       *model.PkgManager               `json:"brew_package_manager,omitempty"`
-	BrewScans            []model.BrewScanResult          `json:"brew_scans"`
-	BrewFormulae         []model.BrewPackage             `json:"brew_formulae,omitempty"`
-	BrewCasks            []model.BrewPackage             `json:"brew_casks,omitempty"`
-	PythonPkgManagers    []model.PkgManager              `json:"python_package_managers"`
-	PythonGlobalPackages []model.PythonScanResult        `json:"python_global_packages"`
-	PythonProjects       []model.ProjectInfo             `json:"python_projects"`
-	SystemPackageScans   []model.SystemPackageScanResult `json:"system_package_scans"`
-	AIAgents             []model.AITool                  `json:"ai_agents"`
-	MCPConfigs           []model.MCPConfigEnterprise     `json:"mcp_configs"`
-	NPMRCAudit           *model.NPMRCAudit               `json:"npmrc_audit,omitempty"`
-	PipAudit             *model.PipAudit                 `json:"pip_audit,omitempty"`
-	RuleScan             *model.RuleScan                 `json:"rule_scan,omitempty"`
-	PnpmAudit            *model.PnpmAudit                `json:"pnpm_audit,omitempty"`
-	BunAudit             *model.BunAudit                 `json:"bun_audit,omitempty"`
-	YarnAudit            *model.YarnAudit                `json:"yarn_audit,omitempty"`
+	IDEExtensions        []model.Extension        `json:"ide_extensions"`
+	IDEInstallations     []model.IDE              `json:"ide_installations"`
+	NodePkgManagers      []model.PkgManager       `json:"node_package_managers"`
+	NodeGlobalPackages   []model.NodeScanResult   `json:"node_global_packages"`
+	NodeProjects         []model.NodeScanResult   `json:"node_projects"`
+	BrewPkgManager       *model.PkgManager        `json:"brew_package_manager,omitempty"`
+	BrewScans            []model.BrewScanResult   `json:"brew_scans"`
+	BrewFormulae         []model.BrewPackage      `json:"brew_formulae,omitempty"`
+	BrewCasks            []model.BrewPackage      `json:"brew_casks,omitempty"`
+	PythonPkgManagers    []model.PkgManager       `json:"python_package_managers"`
+	PythonGlobalPackages []model.PythonScanResult `json:"python_global_packages"`
+	PythonProjects       []model.ProjectInfo      `json:"python_projects"`
+	// Delta-protocol siblings (PayloadSchemaVersion >= 1). NodeProjects /
+	// NodeGlobalPackages / PythonProjects / PythonGlobalPackages above carry
+	// only the `changed` subset; everything else is here.
+	NodeProjectsUnchanged   []model.UnchangedProjectRef     `json:"node_projects_unchanged,omitempty"`
+	NodeProjectsRemoved     []model.RemovedProjectRef       `json:"node_projects_removed,omitempty"`
+	NodeGlobalsUnchanged    []model.UnchangedGlobalRef      `json:"node_globals_unchanged,omitempty"`
+	PythonProjectsUnchanged []model.UnchangedProjectRef     `json:"python_projects_unchanged,omitempty"`
+	PythonProjectsRemoved   []model.RemovedProjectRef       `json:"python_projects_removed,omitempty"`
+	PythonGlobalsUnchanged  []model.UnchangedGlobalRef      `json:"python_globals_unchanged,omitempty"`
+	SystemPackageScans      []model.SystemPackageScanResult `json:"system_package_scans"`
+	AIAgents                []model.AITool                  `json:"ai_agents"`
+	MCPConfigs              []model.MCPConfigEnterprise     `json:"mcp_configs"`
+	NPMRCAudit              *model.NPMRCAudit               `json:"npmrc_audit,omitempty"`
+	PipAudit                *model.PipAudit                 `json:"pip_audit,omitempty"`
+	RuleScan                *model.RuleScan                 `json:"rule_scan,omitempty"`
+	PnpmAudit               *model.PnpmAudit                `json:"pnpm_audit,omitempty"`
+	BunAudit                *model.BunAudit                 `json:"bun_audit,omitempty"`
+	YarnAudit               *model.YarnAudit                `json:"yarn_audit,omitempty"`
 
 	ExecutionLogs      *ExecutionLogs      `json:"execution_logs,omitempty"`
 	PerformanceMetrics *PerformanceMetrics `json:"performance_metrics,omitempty"`
@@ -144,7 +165,7 @@ func Run(exec executor.Executor, log *progress.Logger, cfg *cli.Config) (err err
 	// Detect invocation method once at run start: "install" if the platform's
 	// scheduler footprint is on disk, else "one_time". Threaded into every
 	// run-status post and stamped on the final payload.
-	invocationMethod := DetectInvocationMethod()
+	invocationMethod := DetectInvocationMethod(exec, log)
 
 	// Phase tracker accumulates per-analysis-section completions so the
 	// backend can surface in-flight progress on the console. Reads from the
@@ -269,6 +290,12 @@ func Run(exec executor.Executor, log *progress.Logger, cfg *cli.Config) (err err
 	// short run.
 	postPhaseFinal := func() { sendSnapshot(tailEmitter.ForceAttach) }
 
+	// postPhaseInitial is the first upsert after device_info. Like postPhaseFinal
+	// it FORCES the log tail (bypassing the 2-min throttle) so the run's opening
+	// lines — loader setup, scheduler_info, device_info — reach the backend
+	// right after device_info, even on a short run or one that fails right after.
+	postPhaseInitial := func() { sendSnapshot(tailEmitter.ForceAttach) }
+
 	// Catch SIGINT / SIGTERM so cancellation (Ctrl+C, launchd stop, kill)
 	// still records a failure row and fires the Slack alert before exit.
 	// Go's default signal disposition terminates the process without running
@@ -316,6 +343,13 @@ func Run(exec executor.Executor, log *progress.Logger, cfg *cli.Config) (err err
 	capture := StartCapture()
 	defer capture.Finalize()
 
+	// Fold THIS run's loader-script lines into the capture so the run-status log
+	// tail and final payload include the script's setup — binary auto-update,
+	// config write, version checks — under the same row, not just the binary's
+	// own output. The loader appends them to .loader_log; we read and then delete
+	// it, so it's scoped to the current run. Best-effort; see loader_log.go.
+	seedLoaderLog(capture)
+
 	// Bind the throttled log-tail emitter to the live capture so every
 	// subsequent postPhase() can ship a recent stderr slice attached to
 	// status_info on the throttle's cadence. See log_tail_emitter.go.
@@ -339,7 +373,28 @@ func Run(exec executor.Executor, log *progress.Logger, cfg *cli.Config) (err err
 	}()
 	log.Progress("Lock acquired (PID: %d)", os.Getpid())
 
-	// Device info — first tracked phase. Completes before the "started"
+	// Scheduler info — first tracked phase. Gathers launchd/schtasks/systemd
+	// state (interval, last/next run, RunAtLoad, last exit, missed runs) for
+	// troubleshooting; see docs/launchd-troubleshooting.md. Best-effort —
+	// schedinfo.Gather uses short per-query timeouts and never errors. Like
+	// device_info it completes before the "started" post (so the first
+	// heartbeat includes it), but postPhase() is intentionally NOT called
+	// here: the backend has no run-status row to upsert into until that post,
+	// so this phase's completion ships in the first postPhase() below.
+	schedCtx, schedCancel := startPhase(ctx, tracker, "scheduler_info")
+	log.Progress("Gathering scheduler information...")
+	schedinfo.Log(schedinfo.Gather(schedCtx, exec), log)
+	// Authoritative trigger for this run (same value uploaded as invocation_method
+	// and shown as the Scheduled/Manual badge in the console) — logged here for
+	// at-a-glance triage in agent.log.
+	if invocationMethod == InvocationInstall {
+		log.Progress("  This run: scheduler-triggered (invocation_method=install)")
+	} else {
+		log.Progress("  This run: manual (invocation_method=one_time)")
+	}
+	endPhase(schedCtx, schedCancel, tracker, log, "scheduler_info")
+
+	// Device info — second tracked phase. Completes before the "started"
 	// post so the first heartbeat already includes it in phases_completed.
 	phaseCtx, phaseCancel := startPhase(ctx, tracker, "device_info")
 	log.Progress("Gathering device information...")
@@ -367,13 +422,50 @@ func Run(exec executor.Executor, log *progress.Logger, cfg *cli.Config) (err err
 	}
 	endPhase(phaseCtx, phaseCancel, tracker, log, "device_info")
 
+	// Per-device scan state for the delta-upload protocol. Gated OFF by
+	// default (config.UseLegacyPackageScan defaults true) until the agent-api
+	// side ships. Resolution, in order:
+	//   - STEPSEC_DISABLE_SCAN_STATE=1         (env kill switch, always wins)
+	//   - STEPSEC_ENABLE_SCAN_STATE=1          (env test opt-in)
+	//   - config.UseLegacyPackageScan          (persistent, set in config.json)
+	//   - paths.Home() unresolvable            (no place to write the file)
+	// A disabled gate leaves scanState nil and the run behaves as pre-1.13.
+	var scanState *state.State
+	var scanStatePath string
+	var scanStateFullSync bool
+	scanStateDisabled := config.UseLegacyPackageScan
+	if os.Getenv("STEPSEC_ENABLE_SCAN_STATE") == "1" {
+		scanStateDisabled = false
+	}
+	if os.Getenv("STEPSEC_DISABLE_SCAN_STATE") == "1" {
+		scanStateDisabled = true
+	}
+	if !scanStateDisabled {
+		scanStatePath = paths.ScanStateFile()
+		if scanStatePath != "" {
+			loaded, loadErr := state.Load(scanStatePath, buildinfo.Version)
+			if loadErr != nil {
+				log.Debug("scan-state: load fallback (%v) — treating as empty", loadErr)
+			}
+			scanState = loaded
+			scanStateFullSync = scanState.IsFullSyncDue(time.Now(), buildinfo.Version, state.DefaultFullSyncHorizon)
+			log.Debug("scan-state: loaded from %s (npm=%d python=%d full_sync=%v)",
+				scanStatePath, len(scanState.NPMProjects), len(scanState.PythonProjects), scanStateFullSync)
+		}
+	} else if config.UseLegacyPackageScan {
+		log.Debug("scan-state: disabled by config.use_legacy_package_scan; falling back to full-snapshot uploads")
+	}
+
 	// Report "started" now that we have a device_id. Fire-and-forget.
 	reportRunStatus(ctx, log, executionID, deviceID, runStatusStarted, "", invocationMethod)
 
 	// First progress upsert: surfaces device_info completion immediately
-	// without waiting for the 5-minute heartbeat. Safe to call after the
+	// without waiting for the 5-minute heartbeat, and FORCE-attaches the log
+	// tail (bypassing the 2-min throttle) so the opening lines — loader setup,
+	// scheduler_info, device_info — reach the backend right after device_info,
+	// even on a short run or one that fails right after. Safe to call after the
 	// "started" post because the backend now has a row to upsert into.
-	postPhase()
+	postPhaseInitial()
 
 	// Heartbeat goroutine: pushes status_info on a ticker so a long-running
 	// phase (brew on a 200k-package macbook, syspkg on a fat dpkg machine)
@@ -639,6 +731,7 @@ func Run(exec executor.Executor, log *progress.Logger, cfg *cli.Config) (err err
 	var pythonPkgManagers []model.PkgManager
 	var pythonGlobalPkgs []model.PythonScanResult
 	var pythonProjects []model.ProjectInfo
+	var pythonDiscovered []string
 
 	if pythonEnabled {
 		phaseCtx, phaseCancel = startPhase(ctx, tracker, "python_scan")
@@ -662,8 +755,15 @@ func Run(exec executor.Executor, log *progress.Logger, cfg *cli.Config) (err err
 		log.Progress("  Found %d Python global package source(s)", len(pythonGlobalPkgs))
 
 		log.Progress("Searching for Python projects...")
-		pyProjectDetector := detector.NewPythonProjectDetector(exec).WithSkipper(tccSkipper)
-		pythonProjects = pyProjectDetector.ListProjects(searchDirs)
+		pyProjectDetector := detector.NewPythonProjectDetector(exec).WithSkipper(tccSkipper).WithLogger(log)
+		var knownPython map[string]time.Time
+		if scanState != nil && !scanStateFullSync {
+			knownPython = make(map[string]time.Time, len(scanState.PythonProjects))
+			for path, entry := range scanState.PythonProjects {
+				knownPython[path] = entry.LastVerifiedAt
+			}
+		}
+		pythonProjects, pythonDiscovered = pyProjectDetector.ListProjects(searchDirs, knownPython)
 		log.Progress("  Found %d Python projects", len(pythonProjects))
 		fmt.Fprintln(os.Stderr)
 		endPhase(phaseCtx, phaseCancel, tracker, log, "python_scan")
@@ -746,6 +846,7 @@ func Run(exec executor.Executor, log *progress.Logger, cfg *cli.Config) (err err
 	var pkgManagers []model.PkgManager
 	var globalPkgs []model.NodeScanResult
 	var nodeProjects []model.NodeScanResult
+	var nodeDiscovered []string
 	var nodeScanMs int64
 
 	if npmEnabled {
@@ -782,7 +883,14 @@ func Run(exec executor.Executor, log *progress.Logger, cfg *cli.Config) (err err
 
 		log.Progress("Searching for Node.js projects...")
 		scanStart := time.Now()
-		nodeProjects = nodeScanner.ScanProjects(phaseCtx, searchDirs)
+		var knownNPM map[string]time.Time
+		if scanState != nil && !scanStateFullSync {
+			knownNPM = make(map[string]time.Time, len(scanState.NPMProjects))
+			for path, entry := range scanState.NPMProjects {
+				knownNPM[path] = entry.LastVerifiedAt
+			}
+		}
+		nodeProjects, nodeDiscovered = nodeScanner.ScanProjects(phaseCtx, searchDirs, knownNPM)
 		nodeScanMs = time.Since(scanStart).Milliseconds()
 		log.Progress("  Found %d Node.js projects", len(nodeProjects))
 		log.Progress("  Scan duration: %dms", nodeScanMs)
@@ -862,19 +970,57 @@ func Run(exec executor.Executor, log *progress.Logger, cfg *cli.Config) (err err
 	// runs after this snapshot and is intentionally not tracked as a phase.
 	finalStatusInfo := tracker.Snapshot()
 
+	// Partition this run's scan output against state. When delta is enabled
+	// (snap != nil), the payload below routes changed bodies to the legacy
+	// slots and unchanged/removed projects to the new ref slots.
+	snap := buildDeltaSnapshot(
+		scanState, scanStateFullSync,
+		nodeProjects, nodeDiscovered, pythonProjects, pythonDiscovered,
+		globalPkgs, pythonGlobalPkgs,
+	)
+	payloadNodeProjects := nodeProjects
+	payloadNodeGlobals := globalPkgs
+	payloadPythonProjects := pythonProjects
+	payloadPythonGlobals := pythonGlobalPkgs
+	schemaVersion := 0
+	var npmUnchangedRefs []model.UnchangedProjectRef
+	var npmRemovedRefs []model.RemovedProjectRef
+	var npmGlobalsUnchangedRefs []model.UnchangedGlobalRef
+	var pyUnchangedRefs []model.UnchangedProjectRef
+	var pyRemovedRefs []model.RemovedProjectRef
+	var pyGlobalsUnchangedRefs []model.UnchangedGlobalRef
+	if snap != nil {
+		schemaVersion = CurrentPayloadSchemaVersion
+		payloadNodeProjects = snap.npmChanged
+		payloadNodeGlobals = snap.npmGlobalsChanged
+		payloadPythonProjects = snap.pyChanged
+		payloadPythonGlobals = snap.pyGlobalsChanged
+		npmUnchangedRefs = snap.npmUnchanged
+		npmRemovedRefs = snap.npmRemoved
+		npmGlobalsUnchangedRefs = snap.npmGlobalsUnchanged
+		pyUnchangedRefs = snap.pyUnchanged
+		pyRemovedRefs = snap.pyRemoved
+		pyGlobalsUnchangedRefs = snap.pyGlobalsUnchanged
+		log.Debug("delta payload: npm(changed=%d unchanged=%d removed=%d globals_changed=%d globals_unchanged=%d) python(changed=%d unchanged=%d removed=%d globals_changed=%d globals_unchanged=%d) full_sync=%v",
+			len(payloadNodeProjects), len(npmUnchangedRefs), len(npmRemovedRefs), len(payloadNodeGlobals), len(npmGlobalsUnchangedRefs),
+			len(payloadPythonProjects), len(pyUnchangedRefs), len(pyRemovedRefs), len(payloadPythonGlobals), len(pyGlobalsUnchangedRefs),
+			scanStateFullSync)
+	}
+
 	// Build payload
 	payload := &Payload{
-		CustomerID:     config.CustomerID,
-		DeviceID:       dev.SerialNumber,
-		SerialNumber:   dev.SerialNumber,
-		UserIdentity:   dev.UserIdentity,
-		Hostname:       dev.Hostname,
-		Platform:       dev.Platform,
-		OSVersion:      dev.OSVersion,
-		Resources:      dev.Resources,
-		AgentVersion:   buildinfo.Version,
-		CollectedAt:    endTime.Unix(),
-		NoUserLoggedIn: noUserLoggedIn,
+		PayloadSchemaVersion: schemaVersion,
+		CustomerID:           config.CustomerID,
+		DeviceID:             dev.SerialNumber,
+		SerialNumber:         dev.SerialNumber,
+		UserIdentity:         dev.UserIdentity,
+		Hostname:             dev.Hostname,
+		Platform:             dev.Platform,
+		OSVersion:            dev.OSVersion,
+		Resources:            dev.Resources,
+		AgentVersion:         buildinfo.Version,
+		CollectedAt:          endTime.Unix(),
+		NoUserLoggedIn:       noUserLoggedIn,
 
 		InvocationMethod: invocationMethod,
 		StatusInfo:       &finalStatusInfo,
@@ -882,24 +1028,31 @@ func Run(exec executor.Executor, log *progress.Logger, cfg *cli.Config) (err err
 		IDEExtensions:        extensions,
 		IDEInstallations:     ides,
 		NodePkgManagers:      pkgManagers,
-		NodeGlobalPackages:   globalPkgs,
-		NodeProjects:         nodeProjects,
+		NodeGlobalPackages:   payloadNodeGlobals,
+		NodeProjects:         payloadNodeProjects,
 		BrewPkgManager:       brewPkgMgr,
 		BrewScans:            brewScans,
 		BrewFormulae:         brewFormulae,
 		BrewCasks:            brewCasks,
 		PythonPkgManagers:    pythonPkgManagers,
-		PythonGlobalPackages: pythonGlobalPkgs,
-		PythonProjects:       pythonProjects,
-		SystemPackageScans:   systemPackageScans,
-		AIAgents:             allAI,
-		MCPConfigs:           mcpConfigs,
-		NPMRCAudit:           &npmrcAudit,
-		PipAudit:             &pipAudit,
-		RuleScan:             ruleScan,
-		PnpmAudit:            &pnpmAudit,
-		BunAudit:             &bunAudit,
-		YarnAudit:            &yarnAudit,
+		PythonGlobalPackages: payloadPythonGlobals,
+		PythonProjects:       payloadPythonProjects,
+
+		NodeProjectsUnchanged:   npmUnchangedRefs,
+		NodeProjectsRemoved:     npmRemovedRefs,
+		NodeGlobalsUnchanged:    npmGlobalsUnchangedRefs,
+		PythonProjectsUnchanged: pyUnchangedRefs,
+		PythonProjectsRemoved:   pyRemovedRefs,
+		PythonGlobalsUnchanged:  pyGlobalsUnchangedRefs,
+		SystemPackageScans:      systemPackageScans,
+		AIAgents:                allAI,
+		MCPConfigs:              mcpConfigs,
+		NPMRCAudit:              &npmrcAudit,
+		PipAudit:                &pipAudit,
+		RuleScan:                ruleScan,
+		PnpmAudit:               &pnpmAudit,
+		BunAudit:                &bunAudit,
+		YarnAudit:               &yarnAudit,
 
 		ExecutionLogs: &ExecutionLogs{
 			OutputBase64: execLogsBase64,
@@ -933,6 +1086,16 @@ func Run(exec executor.Executor, log *progress.Logger, cfg *cli.Config) (err err
 			return err
 		}
 		log.Progress("telemetry written to %s (upload skipped)", cfg.TelemetryOutFile)
+		// Treat a successful local dump as a successful upload for the
+		// purposes of scan-state persistence so dev/stress-test runs
+		// produce comparable second-run behavior to a real upload.
+		if snap != nil {
+			if err := commitDeltaSnapshot(scanState, snap, scanStatePath, executionID, buildinfo.Version); err != nil {
+				log.Warn("scan-state: save failed (%v) — next run will full-sync", err)
+			} else {
+				log.Debug("scan-state: saved %s (telemetry-out mode)", scanStatePath)
+			}
+		}
 		return nil
 	}
 
@@ -957,6 +1120,14 @@ func Run(exec executor.Executor, log *progress.Logger, cfg *cli.Config) (err err
 		return fmt.Errorf("uploading telemetry: %w", err)
 	}
 	endPhase(phaseCtx, phaseCancel, tracker, log, "telemetry_upload")
+
+	if snap != nil {
+		if err := commitDeltaSnapshot(scanState, snap, scanStatePath, executionID, buildinfo.Version); err != nil {
+			log.Warn("scan-state: save failed (%v) — next run will full-sync", err)
+		} else {
+			log.Debug("scan-state: saved %s", scanStatePath)
+		}
+	}
 
 	fmt.Fprintln(os.Stderr)
 	log.Progress("Telemetry collection completed successfully")
@@ -984,6 +1155,16 @@ func writeTelemetryFile(path string, payload *Payload) error {
 		return fmt.Errorf("telemetry-out: write payload: %w", err)
 	}
 	return nil
+}
+
+// decodeBase64OrRaw returns the bytes decoded from a standard base64 string,
+// falling back to the raw string bytes when the input isn't valid base64.
+func decodeBase64OrRaw(s string) []byte {
+	decoded, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		return []byte(s)
+	}
+	return decoded
 }
 
 func brewFormulaeCount(scans []model.BrewScanResult) int {
