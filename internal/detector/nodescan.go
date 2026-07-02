@@ -486,7 +486,10 @@ func (s *NodeScanner) ScanProjects(ctx context.Context, searchDirs []string, kno
 	totalSize := int64(0)
 	capped := make([]model.NodeScanResult, 0, len(results))
 	for _, r := range results {
-		resultSize := int64(len(r.RawStdoutBase64)) + int64(len(r.RawStderrBase64))
+		// Disk-scan results leave RawStdout/Stderr empty and carry the payload
+		// in Packages instead, so count an estimate of that too — otherwise a
+		// monorepo's structured packages bypass the cap entirely.
+		resultSize := int64(len(r.RawStdoutBase64)) + int64(len(r.RawStderrBase64)) + estimatePackagesBytes(r.Packages)
 		if totalSize+resultSize > maxBytes {
 			s.log.Warn("Reached data size limit (%d bytes collected, limit: %d bytes)", totalSize, maxBytes)
 			s.log.Warn("Skipping remaining projects (prioritized by most recently modified)")
@@ -497,6 +500,20 @@ func (s *NodeScanner) ScanProjects(ctx context.Context, searchDirs []string, kno
 	}
 
 	return capped, discovered
+}
+
+// estimatePackagesBytes approximates the serialized size of a disk-scan
+// result's structured Packages so ScanProjects' total-size cap can count them.
+// The per-package constant covers JSON field names, quotes, and separators;
+// exactness isn't needed — this only has to keep a pathological monorepo from
+// slipping past the cap when RawStdout/Stderr are empty.
+func estimatePackagesBytes(pkgs []model.NodePackage) int64 {
+	const perPackageOverhead = 40 // {"name":"","version":"","is_direct":true},
+	total := int64(0)
+	for _, p := range pkgs {
+		total += int64(len(p.Name) + len(p.Version) + perPackageOverhead)
+	}
+	return total
 }
 
 // scanProjectsConcurrent returns one NodeScanResult per project in the input
