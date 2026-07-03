@@ -25,6 +25,23 @@ var (
 	HTMLOutputFile      string // "" means not set
 	LogLevel            string // "" means default (info); one of error/warn/info/debug
 	InstallDir          string // "" means default (~/.stepsecurity); non-empty makes the agent put all its files (logs, hook errors, future state) under this directory. Bootstrap config.json itself stays at the legacy location. Per-run opt-out is the CLI flag --install-dir=. Resolution: --install-dir flag > STEPSECURITY_HOME env > this field > default — see internal/paths.
+	// UseLegacyPackageScan, when true, disables the scan-state delta-upload
+	// optimization for npm and Python project scans — every run re-uploads
+	// the full snapshot as in pre-1.13 agents.
+	//
+	// Defaults to true: the delta protocol is gated OFF until the agent-api
+	// side ships. Set use_legacy_package_scan=false in config.json (or
+	// STEPSEC_ENABLE_SCAN_STATE=1) to opt back in. STEPSEC_DISABLE_SCAN_STATE=1
+	// always forces legacy.
+	UseLegacyPackageScan = true
+
+	// UseLegacyPythonScan, when true, reverts Python package discovery to the
+	// command-based path (`pip list` per venv and `pip3`/`conda`/`uv list`
+	// for globals). Defaults to false: Python packages are read from on-disk
+	// install metadata (*.dist-info/METADATA, *.egg-info/PKG-INFO) with no
+	// package-manager subprocess. Set use_legacy_python_scan=true in
+	// config.json (or --legacy-python-scan) to opt back into the pip path.
+	UseLegacyPythonScan = false
 )
 
 // MaxExecutionDuration is the whole-process execution-watchdog limit
@@ -54,6 +71,8 @@ type ConfigFile struct {
 	LogLevel             string   `json:"log_level,omitempty"`
 	InstallDir           string   `json:"install_dir,omitempty"`
 	MaxExecutionDuration string   `json:"max_execution_duration,omitempty"`
+	UseLegacyPackageScan *bool    `json:"use_legacy_package_scan,omitempty"`
+	UseLegacyPythonScan  *bool    `json:"use_legacy_python_scan,omitempty"`
 }
 
 // userConfigDir returns ~/.stepsecurity — the per-user config location.
@@ -186,6 +205,12 @@ func Load() {
 	if cfg.MaxExecutionDuration != "" && MaxExecutionDuration == "" {
 		MaxExecutionDuration = cfg.MaxExecutionDuration
 	}
+	if cfg.UseLegacyPackageScan != nil {
+		UseLegacyPackageScan = *cfg.UseLegacyPackageScan
+	}
+	if cfg.UseLegacyPythonScan != nil {
+		UseLegacyPythonScan = *cfg.UseLegacyPythonScan
+	}
 }
 
 // IsEnterpriseMode returns true if valid enterprise credentials are configured.
@@ -210,6 +235,10 @@ func RunConfigure() error {
 	existing.APIEndpoint = promptValue(reader, "API Endpoint", existing.APIEndpoint)
 	existing.APIKey = promptSecret(reader, "API Key", existing.APIKey)
 	existing.ScanFrequencyHours = promptValue(reader, "Scan Frequency (hours)", existing.ScanFrequencyHours)
+	// Whole-process execution watchdog. A Go duration string ("2h", "30m"),
+	// "off"/"0" to disable, or blank for the built-in 4h default. See
+	// telemetry.ExecutionDeadline.
+	existing.MaxExecutionDuration = promptValue(reader, "Max Execution Duration (e.g. 2h, 30m; 'off' to disable; blank = default 4h)", existing.MaxExecutionDuration)
 
 	// Search dirs
 	currentDirs := ""
@@ -291,6 +320,23 @@ func RunConfigure() error {
 		existing.EnablePythonScan = &v
 	default:
 		existing.EnablePythonScan = nil
+	}
+
+	// Include macOS TCC-protected dirs (Documents, Downloads, ~/Library/Mail,
+	// …). Default is to skip them so the agent never triggers permission
+	// prompts; opt in only after granting Full Disk Access (PPPC profile or
+	// System Settings). See docs/macos-tcc-permissions.md. Stored only when
+	// enabled — anything but "true" clears it back to the default skip.
+	currentTCC := "false"
+	if existing.IncludeTCCProtected != nil && *existing.IncludeTCCProtected {
+		currentTCC = "true"
+	}
+	tccInput := promptValue(reader, "Scan macOS TCC-protected dirs — Documents, Downloads, … (true/false)", currentTCC)
+	if strings.EqualFold(strings.TrimSpace(tccInput), "true") {
+		v := true
+		existing.IncludeTCCProtected = &v
+	} else {
+		existing.IncludeTCCProtected = nil
 	}
 
 	// Color mode
@@ -476,10 +522,13 @@ func ShowConfigure() {
 	fmt.Printf("  %-24s %s\n", "API Endpoint:", displayValue(cfg.APIEndpoint))
 	fmt.Printf("  %-24s %s\n", "API Key:", maskSecret(cfg.APIKey))
 	fmt.Printf("  %-24s %s\n", "Scan Frequency:", displayFrequency(cfg.ScanFrequencyHours))
+	fmt.Printf("  %-24s %s\n", "Max Execution Duration:", displayMaxExecution(cfg.MaxExecutionDuration))
 	fmt.Printf("  %-24s %s\n", "Search Directories:", displayDirs(cfg.SearchDirs))
 	fmt.Printf("  %-24s %s\n", "Enable NPM Scan:", displayBoolScan(cfg.EnableNPMScan))
 	fmt.Printf("  %-24s %s\n", "Enable Brew Scan:", displayBoolScan(cfg.EnableBrewScan))
 	fmt.Printf("  %-24s %s\n", "Enable Python Scan:", displayBoolScan(cfg.EnablePythonScan))
+	fmt.Printf("  %-24s %s\n", "Legacy Python Scan:", displayBoolScan(cfg.UseLegacyPythonScan))
+	fmt.Printf("  %-24s %s\n", "Scan TCC-Protected Dirs:", displayTCC(cfg.IncludeTCCProtected))
 	fmt.Printf("  %-24s %s\n", "Color Mode:", displayColorMode(cfg.ColorMode))
 	fmt.Printf("  %-24s %s\n", "Output Format:", displayOutputFormat(cfg.OutputFormat))
 	if cfg.OutputFormat == "html" {
@@ -564,6 +613,30 @@ func displayInstallDir(v string) string {
 		return "~/.stepsecurity (default)"
 	}
 	return v
+}
+
+// displayMaxExecution renders the execution-watchdog setting. Empty falls back
+// to the built-in 4h default; "0"/"off" disables the watchdog; any other value
+// is a Go duration string echoed as-is (validated at run time by
+// telemetry.ExecutionDeadline).
+func displayMaxExecution(v string) string {
+	switch v {
+	case "":
+		return "4h (default)"
+	case "0", "off":
+		return "off (watchdog disabled)"
+	default:
+		return v
+	}
+}
+
+// displayTCC renders the macOS TCC opt-in. nil/false both mean the default
+// (skip TCC-protected dirs to avoid permission prompts); true means scan them.
+func displayTCC(v *bool) string {
+	if v != nil && *v {
+		return "true (scanning TCC-protected dirs)"
+	}
+	return "false (default — TCC-protected dirs skipped)"
 }
 
 func isPlaceholder(v string) bool {

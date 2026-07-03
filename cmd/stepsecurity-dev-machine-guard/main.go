@@ -21,7 +21,9 @@ import (
 	"github.com/step-security/dev-machine-guard/internal/device"
 	"github.com/step-security/dev-machine-guard/internal/executor"
 	"github.com/step-security/dev-machine-guard/internal/featuregate"
+	"github.com/step-security/dev-machine-guard/internal/heartbeat"
 	"github.com/step-security/dev-machine-guard/internal/launchd"
+	"github.com/step-security/dev-machine-guard/internal/model"
 	"github.com/step-security/dev-machine-guard/internal/output"
 	"github.com/step-security/dev-machine-guard/internal/paths"
 	"github.com/step-security/dev-machine-guard/internal/progress"
@@ -95,6 +97,11 @@ func main() {
 	}
 	if cfg.EnablePythonScan == nil && config.EnablePythonScan != nil {
 		cfg.EnablePythonScan = config.EnablePythonScan
+	}
+	// --legacy-python-scan / --disk-python-scan override the config-file value
+	// (which config.Load already applied to config.UseLegacyPythonScan).
+	if cfg.UseLegacyPythonScan != nil {
+		config.UseLegacyPythonScan = *cfg.UseLegacyPythonScan
 	}
 	if cfg.IncludeTCCProtected == nil && config.IncludeTCCProtected != nil {
 		cfg.IncludeTCCProtected = config.IncludeTCCProtected
@@ -240,6 +247,10 @@ func main() {
 		config.ShowConfigure()
 
 	case "send-telemetry":
+		// Stamp the local heartbeat first — before the enterprise gate and
+		// the singleton lock inside telemetry.Run — so even runs that bail at
+		// the gate or die during startup leave an on-disk "I started" record.
+		writeHeartbeat(exec, "send-telemetry", log)
 		if !config.IsEnterpriseMode() {
 			log.Error("Enterprise configuration not found. Run '%s configure' or download the script from your StepSecurity dashboard.", os.Args[0])
 			os.Exit(1)
@@ -258,17 +269,17 @@ func main() {
 			os.Exit(1)
 		}
 		switch runtime.GOOS {
-		case "windows":
+		case model.PlatformWindows:
 			if err := schtasks.Install(exec, log); err != nil {
 				log.Error("%v", err)
 				os.Exit(1)
 			}
-		case "darwin":
+		case model.PlatformDarwin:
 			if err := launchd.Install(exec, log); err != nil {
 				log.Error("%v", err)
 				os.Exit(1)
 			}
-		case "linux":
+		case model.PlatformLinux:
 			if err := systemd.Install(exec, log); err != nil {
 				log.Error("%v", err)
 				os.Exit(1)
@@ -297,10 +308,21 @@ func main() {
 		// If no one is logged in (unattended SCCM deploys), the trigger
 		// silently no-ops and the task fires on its next hourly tick;
 		// either way, no SYSTEM-context telemetry ever ships.
-		if runtime.GOOS == "windows" && winproc.IsLocalSystem() {
+		if runtime.GOOS == model.PlatformWindows && winproc.IsLocalSystem() {
 			if err := schtasks.RunNow(exec, log); err != nil {
 				log.Warn("could not trigger initial scan (%v) — the scheduled task will fire on its next interval", err)
 			}
+			runHookStateReconcile(exec, log)
+			return
+		}
+
+		// On macOS, launchd.Install already loaded the plist, and RunAtLoad=true
+		// runs the initial scan immediately under the user's GUI session. Don't
+		// also scan inline here — that would double-scan at install (two TCC
+		// rounds + two uploads), with the second run blocked on the singleton
+		// lock. Mirrors the Windows-SYSTEM path above; the launchd-triggered
+		// scan's output lands in agent.log.
+		if runtime.GOOS == model.PlatformDarwin {
 			runHookStateReconcile(exec, log)
 			return
 		}
@@ -316,7 +338,7 @@ func main() {
 		// not race with that scan (issue #62). Run regardless of the
 		// telemetry result — the install itself succeeded and the schedule
 		// should activate; a failed initial telemetry run does not undo it.
-		if runtime.GOOS == "linux" {
+		if runtime.GOOS == model.PlatformLinux {
 			if err := systemd.StartTimer(exec, log); err != nil {
 				log.Warn("timer start failed (%v) — scheduled scans will resume after the next user-systemd reload", err)
 			}
@@ -341,17 +363,17 @@ func main() {
 	case "uninstall":
 		_, _ = fmt.Fprintf(os.Stdout, "StepSecurity Dev Machine Guard v%s\n\n", buildinfo.Version)
 		switch runtime.GOOS {
-		case "windows":
+		case model.PlatformWindows:
 			if err := schtasks.Uninstall(exec, log); err != nil {
 				log.Error("%v", err)
 				os.Exit(1)
 			}
-		case "darwin":
+		case model.PlatformDarwin:
 			if err := launchd.Uninstall(exec, log); err != nil {
 				log.Error("%v", err)
 				os.Exit(1)
 			}
-		case "linux":
+		case model.PlatformLinux:
 			if err := systemd.Uninstall(exec, log); err != nil {
 				log.Error("%v", err)
 				os.Exit(1)
@@ -597,6 +619,17 @@ func findLegacyLeftovers(legacy string) []string {
 // state and reconciles local hook installation to match. Silent no-op
 // in community mode (enterprise config missing) — the existing scan
 // path stays unaffected. Failures are logged but never crash main.
+// writeHeartbeat stamps last-run.json with this run's start metadata. Wholly
+// best-effort: a write failure (read-only home, disabled install dir) is
+// logged at debug and never affects the run. The invocation method reuses the
+// scheduler-footprint detection telemetry already does, so the heartbeat
+// distinguishes a scheduled fire from a manual run.
+func writeHeartbeat(exec executor.Executor, command string, log *progress.Logger) {
+	if err := heartbeat.Write(paths.HeartbeatFile(), command, telemetry.DetectInvocationMethod(exec, log)); err != nil {
+		log.Debug("heartbeat: failed to write %s: %v", paths.HeartbeatFile(), err)
+	}
+}
+
 func runHookStateReconcile(exec executor.Executor, log *progress.Logger) {
 	if !featuregate.IsEnabled(featuregate.FeatureAIAgentHooks) {
 		log.Debug("hook-state reconcile: skipped (feature gated)")
