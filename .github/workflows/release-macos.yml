@@ -214,6 +214,7 @@ jobs:
           set -euo pipefail
           version="${{ steps.version.outputs.version }}"
           gh release upload "${{ inputs.tag }}" \
+            -R "${{ github.repository }}" \
             "dist/stepsecurity-dev-machine-guard-${version}-darwin" \
             "dist/stepsecurity-dev-machine-guard-darwin.bundle" \
             --clobber
@@ -221,6 +222,7 @@ jobs:
           # The unsigned binary should not remain on the release; best-effort
           # cleanup so users only see the notarized artifact.
           gh release delete-asset "${{ inputs.tag }}" \
+            -R "${{ github.repository }}" \
             "stepsecurity-dev-machine-guard-${version}-darwin_unnotarized" -y || true
 
       - name: Attest darwin build provenance
