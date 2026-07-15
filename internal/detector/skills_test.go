@@ -634,16 +634,24 @@ func TestCensus_NoByteReads(t *testing.T) {
 func TestCensus_CodeCount(t *testing.T) {
 	m, fs := newSkillsMock()
 	dir := testHome + "/skills/s"
-	fs.addSkill(dir, "SKILL.md", "---\nname: t\ndescription: d\n---\n", map[string]string{"run.py": "x=1\n"})
+	// One code file per recognized group — python, Windows script, other
+	// interpreter, node variant, shell family — plus a non-code binary.
+	fs.addSkill(dir, "SKILL.md", "---\nname: t\ndescription: d\n---\n", map[string]string{
+		"run.py":     "x=1\n",
+		"run.ps1":    "Write-Host hi\n",
+		"lib.rb":     "puts 1\n",
+		"mod.mjs":    "export const x = 1\n",
+		"setup.bash": "echo hi\n",
+	})
 	fs.addFileBytes(filepath.Join(dir, "blob.bin"), []byte{0xff, 0xfe, 0x00, 0x01})
 	fs.commit()
 
 	c := NewSkillsDetector(m).census(context.Background(), dir)
-	if c.codeFileCount != 1 {
-		t.Errorf("codeFileCount = %d, want 1", c.codeFileCount)
+	if c.codeFileCount != 5 {
+		t.Errorf("codeFileCount = %d, want 5 (py, ps1, rb, mjs, bash — SKILL.md and blob.bin are not code)", c.codeFileCount)
 	}
-	if c.fileCount != 3 {
-		t.Errorf("fileCount = %d, want 3 (SKILL.md + run.py + blob.bin, binary still counted)", c.fileCount)
+	if c.fileCount != 7 {
+		t.Errorf("fileCount = %d, want 7 (SKILL.md + 5 code files + blob.bin, binary still counted)", c.fileCount)
 	}
 }
 

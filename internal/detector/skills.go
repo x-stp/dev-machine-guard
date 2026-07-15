@@ -33,9 +33,23 @@ const (
 	skillsPhaseBudget   = 60 * time.Second // overall phase deadline
 )
 
-// codeExtensions are files agents execute directly.
+// codeExtensions are files an agent or the OS executes directly — the script
+// and interpreter types that make has_code a "this skill could run code"
+// signal. Compiled languages (.go/.rs/.c/…) are intentionally excluded: they
+// need a build step, so they're a weaker "executes directly" signal and more
+// prone to false positives (vendored deps / build artifacts). Keys are
+// lowercased, dot-prefixed to match strings.ToLower(filepath.Ext(name)).
 var codeExtensions = map[string]bool{
-	".py": true, ".js": true, ".ts": true, ".sh": true,
+	// Python
+	".py": true, ".pyw": true,
+	// Node / JS / TS variants
+	".js": true, ".ts": true, ".mjs": true, ".cjs": true, ".jsx": true, ".tsx": true,
+	// Shell family
+	".sh": true, ".bash": true, ".zsh": true, ".fish": true,
+	// Windows scripts
+	".ps1": true, ".psm1": true, ".bat": true, ".cmd": true,
+	// Other interpreters
+	".rb": true, ".pl": true, ".php": true, ".lua": true,
 }
 
 // hashExcludedNames are files excluded from the census (VCS noise / OS cruft).
