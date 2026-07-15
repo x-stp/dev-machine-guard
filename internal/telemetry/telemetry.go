@@ -966,7 +966,7 @@ func Run(exec executor.Executor, log *progress.Logger, cfg *cli.Config) (err err
 		// resolves to the logged-in user, not the SYSTEM/root profile, under an
 		// unattended enterprise deploy. The wrapper currently passes all read ops
 		// straight through, so this is convention + future-proofing, not a live fix.
-		skillsDetector := detector.NewSkillsDetector(userExec)
+		skillsDetector := detector.NewSkillsDetector(userExec).WithSkipper(tccSkipper)
 		agentSkills, agentSkillScan = skillsDetector.Detect(phaseCtx, collectProjectRoots(nodeProjects, pythonProjects))
 		log.Progress("  Found %d agent skills across %d roots", len(agentSkills), len(agentSkillScan.RootsScanned))
 		fmt.Fprintln(os.Stderr)

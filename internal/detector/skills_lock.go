@@ -91,6 +91,15 @@ func (d *SkillsDetector) applyLocks(discovered []discoveredSkill, projects []str
 // Successfully parsed files (even with an empty skills map) count toward
 // LockFilesParsed.
 func (d *SkillsDetector) loadLock(lockPath, installBase string, info *model.AgentSkillScanInfo) []lockEntry {
+	// TCC: never stat a lock path inside a macOS-protected tree. XDG_STATE_HOME
+	// can point under ~/Library, so the global XDG lock (applyLocks) may resolve
+	// there, and the Stat below would fire a permission prompt. WithinProtected is
+	// a no-op off macOS and on a nil skipper (--include-tcc-protected), so this
+	// only suppresses the prompt on the default macOS scan; the skip is surfaced
+	// via the shared TCC log line (WithinProtected records a hit).
+	if d.skipper.WithinProtected(lockPath) {
+		return nil
+	}
 	// Bound the read: a project lock lives in any of up to 200 repos the dev has
 	// opened, so its size is attacker-influenced. Stat-gate before slurping so a
 	// hostile multi-GB skills-lock.json cannot balloon RSS (the sibling node/python

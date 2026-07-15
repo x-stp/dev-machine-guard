@@ -7,10 +7,12 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/step-security/dev-machine-guard/internal/executor"
 	"github.com/step-security/dev-machine-guard/internal/model"
+	"github.com/step-security/dev-machine-guard/internal/tcc"
 )
 
 // Caps and budgets. A hostile skill folder must
@@ -48,12 +50,22 @@ var hashExcludedNames = map[string]bool{
 // root (global, project, and skills.sh lock-managed). It performs pure
 // filesystem reads only — no subprocesses — so it needs no user shell.
 type SkillsDetector struct {
-	exec executor.Executor
+	exec    executor.Executor
+	skipper *tcc.Skipper
 }
 
 // NewSkillsDetector constructs a SkillsDetector.
 func NewSkillsDetector(exec executor.Executor) *SkillsDetector {
 	return &SkillsDetector{exec: exec}
+}
+
+// WithSkipper attaches a TCC skipper so discovery skips macOS-protected
+// directories (and projects registered inside them, e.g. under ~/Documents)
+// without triggering a permission prompt. A nil skipper is a no-op, matching
+// the --include-tcc-protected opt-in. Returns the detector for chaining.
+func (d *SkillsDetector) WithSkipper(s *tcc.Skipper) *SkillsDetector {
+	d.skipper = s
+	return d
 }
 
 // CollectProjectRoots flattens the Path of one or more ProjectInfo lists into a
@@ -207,7 +219,11 @@ func (d *SkillsDetector) resolveGlobalRoots(info *model.AgentSkillScanInfo) []sk
 	var roots []skillsRoot
 
 	add := func(pathStr, source, agent, scope, excludeName string) {
-		if pathStr == "" || !d.exec.DirExists(pathStr) {
+		// WithinProtected before DirExists: DirExists stats, and a stat inside a
+		// protected tree fires the prompt. Defense-in-depth — today's global roots
+		// (~/.claude, /etc/codex, …) never live under a protected dir, but a future
+		// one might.
+		if pathStr == "" || d.skipper.WithinProtected(pathStr) || !d.exec.DirExists(pathStr) {
 			return
 		}
 		roots = append(roots, skillsRoot{
@@ -269,7 +285,10 @@ func (d *SkillsDetector) resolveProjectRoots(project string, info *model.AgentSk
 	var roots []skillsRoot
 	add := func(rel []string, source, agent string) {
 		p := filepath.Join(append([]string{project}, rel...)...)
-		if !d.exec.DirExists(p) {
+		// WithinProtected before DirExists (which stats): second layer behind the
+		// discoverProjects guard, so a protected project root that ever reached
+		// here still cannot pop a prompt via a per-project skill dir probe.
+		if d.skipper.WithinProtected(p) || !d.exec.DirExists(p) {
 			return
 		}
 		roots = append(roots, skillsRoot{
@@ -302,6 +321,16 @@ func (d *SkillsDetector) discoverProjects(extra []string, info *model.AgentSkill
 	var out []string
 	consider := func(p string) {
 		if p == "" {
+			return
+		}
+		// TCC: drop a project registered inside a macOS-protected tree (e.g.
+		// ~/Documents) BEFORE resolvePath — EvalSymlinks stats every path
+		// component, and statting inside the protected tree is itself what fires
+		// the permission prompt we are avoiding. Canonicalize lexically only (no
+		// EvalSymlinks/Stat) so the check touches nothing on disk. Both the
+		// ~/.claude.json and node/python `extra` roots flow through here, so this
+		// one choke point covers every self-discovered project root.
+		if d.skipper.WithinProtected(canonicalNoStat(p, home)) {
 			return
 		}
 		resolved := d.resolvePath(p)
@@ -429,6 +458,15 @@ func (d *SkillsDetector) handleSymlinkEntry(ctx context.Context, records *[]disc
 		d.addError(info, fmt.Sprintf("dangling symlink %s: %v", linkPath, err))
 		return
 	}
+	if d.skipper.WithinProtected(target) {
+		// Symlink target escapes into a TCC-protected tree — skip it before the
+		// DirExists/ReadDir below stat inside that tree. Residual: EvalSymlinks
+		// above already statted the target, so a symlink pointing directly into a
+		// protected dir can still prompt before this guard. Fully closing that
+		// needs a raw Readlink + ancestor-check before following; rare (a symlink
+		// from a safe skill root into a protected dir), tracked as a follow-up.
+		return
+	}
 	if !d.exec.DirExists(target) {
 		return
 	}
@@ -527,6 +565,26 @@ func (d *SkillsDetector) resolvePath(p string) string {
 		return resolved
 	}
 	return p
+}
+
+// canonicalNoStat returns an absolute, ~-expanded, lexically-cleaned form of p
+// with no filesystem access, so it is safe to hand to tcc.WithinProtected for a
+// path that may live under a protected dir (statting it is what pops the
+// dialog). Unlike resolvePath it never calls EvalSymlinks/Stat; filepath.Abs
+// only consults os.Getwd. ~/.claude.json keys are normally absolute — the ~
+// handling is defensive.
+func canonicalNoStat(p, home string) string {
+	if p == "~" {
+		p = home
+	} else if strings.HasPrefix(p, "~/") && home != "" {
+		p = filepath.Join(home, p[2:])
+	}
+	if !filepath.IsAbs(p) {
+		if abs, err := filepath.Abs(p); err == nil { // Abs does not stat p
+			p = abs
+		}
+	}
+	return filepath.Clean(p)
 }
 
 // addError appends a bounded scan error (≤50 entries, each ≤256 chars) so a

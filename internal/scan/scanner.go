@@ -246,7 +246,7 @@ func Run(exec executor.Executor, log *progress.Logger, cfg *cli.Config) error {
 	if featuregate.IsEnabled(featuregate.FeatureAgentSkillsScan) {
 		log.StepStart("Collecting AI agent skills")
 		start = time.Now()
-		skillsDetector := detector.NewSkillsDetector(exec)
+		skillsDetector := detector.NewSkillsDetector(exec).WithSkipper(tccSkipper)
 		agentSkills, agentSkillScan = skillsDetector.Detect(ctx, detector.CollectProjectRoots(nodeProjects, pythonProjects))
 		log.StepDone(time.Since(start))
 	}
