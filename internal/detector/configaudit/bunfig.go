@@ -271,6 +271,10 @@ func (d *BunDetector) collectFile(ctx context.Context, path, scope string) model
 func (d *BunDetector) bunVersion(ctx context.Context) string {
 	// Static-first, exec-last (AGENTS.md §3.4): bun's Homebrew install path
 	// encodes the version; other installs fall through to exec.
+	// Run the exact absolute path the guard assessed, not the bare name —
+	// a PATH re-resolution at exec time could pick a different (unassessed)
+	// binary. The name is only used when LookPath itself failed.
+	target := "bun"
 	if path, err := d.exec.LookPath("bun"); err == nil {
 		if v := versionmeta.FromBinary(ctx, d.exec, path); v != "" {
 			return v
@@ -279,9 +283,10 @@ func (d *BunDetector) bunVersion(ctx context.Context) string {
 			d.log.Warn("skipping %s version probe: quarantined and rejected by Gatekeeper", path)
 			return "unknown"
 		}
+		target = path
 	}
-	d.log.Progress("exec fallback: running bun --version (no metadata version source)")
-	stdout, _, exit, _ := d.exec.RunWithTimeout(ctx, 5*time.Second, "bun", "--version")
+	d.log.Progress("exec fallback: running %s --version (no metadata version source)", target)
+	stdout, _, exit, _ := d.exec.RunWithTimeout(ctx, 5*time.Second, target, "--version")
 	if exit != 0 {
 		return "unknown"
 	}

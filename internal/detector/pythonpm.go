@@ -65,8 +65,11 @@ func (d *PythonPMDetector) DetectManagers(ctx context.Context) []model.PkgManage
 		} else if !execguard.SafeToExec(ctx, d.exec, path) {
 			d.log.Warn("skipping %s version probe: quarantined and rejected by Gatekeeper", path)
 		} else {
-			d.log.Progress("exec fallback: running %s %s (no metadata version source)", pm.Binary, pm.VersionCmd)
-			stdout, _, _, err := d.exec.RunWithTimeout(ctx, 10*time.Second, pm.Binary, pm.VersionCmd)
+			// Run the exact absolute path the guard assessed, not the bare
+			// name — a PATH re-resolution at exec time could pick a
+			// different (unassessed) binary.
+			d.log.Progress("exec fallback: running %s %s (no metadata version source)", path, pm.VersionCmd)
+			stdout, _, _, err := d.exec.RunWithTimeout(ctx, 10*time.Second, path, pm.VersionCmd)
 			if err == nil {
 				if v := parsePythonVersion(pm.Name, stdout); v != "" {
 					version = v

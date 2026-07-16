@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"time"
 
 	"github.com/step-security/dev-machine-guard/internal/executor"
 	"github.com/step-security/dev-machine-guard/internal/model"
@@ -164,7 +165,7 @@ func versionFromAppBundle(ctx context.Context, exec executor.Executor, resolved 
 	if !exec.FileExists(plist) {
 		return ""
 	}
-	stdout, _, _, err := exec.Run(ctx, "/usr/libexec/PlistBuddy", "-c", "Print :CFBundleShortVersionString", plist)
+	stdout, _, _, err := exec.RunWithTimeout(ctx, 10*time.Second, "/usr/libexec/PlistBuddy", "-c", "Print :CFBundleShortVersionString", plist)
 	if err != nil {
 		return ""
 	}

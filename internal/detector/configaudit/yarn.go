@@ -277,6 +277,10 @@ func (d *YarnDetector) yarnVersion(ctx context.Context) string {
 	// Static-first, exec-last (AGENTS.md §3.4): classic yarn is an npm
 	// package whose manifest carries the version; a corepack shim's manifest
 	// won't match "yarn" and falls through to exec.
+	// Run the exact absolute path the guard assessed, not the bare name —
+	// a PATH re-resolution at exec time could pick a different (unassessed)
+	// binary. The name is only used when LookPath itself failed.
+	target := "yarn"
 	if path, err := d.exec.LookPath("yarn"); err == nil {
 		if v := versionmeta.FromBinary(ctx, d.exec, path); v != "" {
 			return v
@@ -285,9 +289,10 @@ func (d *YarnDetector) yarnVersion(ctx context.Context) string {
 			d.log.Warn("skipping %s version probe: quarantined and rejected by Gatekeeper", path)
 			return "unknown"
 		}
+		target = path
 	}
-	d.log.Progress("exec fallback: running yarn --version (no metadata version source)")
-	stdout, _, exit, _ := d.exec.RunWithTimeout(ctx, 5*time.Second, "yarn", "--version")
+	d.log.Progress("exec fallback: running %s --version (no metadata version source)", target)
+	stdout, _, exit, _ := d.exec.RunWithTimeout(ctx, 5*time.Second, target, "--version")
 	if exit != 0 {
 		return "unknown"
 	}

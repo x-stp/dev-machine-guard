@@ -11,7 +11,7 @@ See [VERSIONING.md](VERSIONING.md) for why the version starts at 1.8.1.
 
 ### Added
 
-- **Gatekeeper pre-exec guard (macOS)**: before any version-probe exec fallback, the agent checks the resolved binary (and its containing directory) for the `com.apple.quarantine` attribute; quarantined binaries are then assessed silently with `spctl --assess --type execute`, and Gatekeeper-rejected ones are skipped (version reported as `unknown`) instead of executed — so a scan can never trigger the macOS "could not verify … free of malware" dialog, even for tools whose install layout carries no readable version metadata. Unquarantined binaries (e.g. Homebrew formulae) are unaffected.
+- **Gatekeeper pre-exec guard (macOS)**: before any version-probe exec fallback, the agent checks the resolved binary (and its containing directory) for the `com.apple.quarantine` attribute; quarantined binaries are then assessed silently with `spctl --assess --type execute`, and Gatekeeper-rejected ones are skipped (version reported as `unknown`) instead of executed. This removes the main scan-triggered path to the macOS "could not verify … free of malware" dialog for tools whose install layout carries no readable version metadata. It is not a blanket guarantee: the assessment covers the launched binary itself, so a Gatekeeper-accepted binary that loads a separately quarantined, un-notarized plugin at runtime could still prompt — metadata-first resolution (which avoids the exec entirely) remains the primary defense. Unquarantined binaries (e.g. Homebrew formulae) are unaffected.
 
 ### Changed
 
