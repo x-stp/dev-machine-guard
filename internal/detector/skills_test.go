@@ -474,7 +474,7 @@ type pipeDirEntry struct{ name string }
 func (e pipeDirEntry) Name() string               { return e.name }
 func (e pipeDirEntry) IsDir() bool                { return false }
 func (e pipeDirEntry) Type() os.FileMode          { return os.ModeNamedPipe }
-func (e pipeDirEntry) Info() (os.FileInfo, error) { return pipeFileInfo{name: e.name}, nil }
+func (e pipeDirEntry) Info() (os.FileInfo, error) { return pipeFileInfo(e), nil }
 
 func TestFindSkillMD_RejectsNonRegular(t *testing.T) {
 	// A FIFO named SKILL.md must not qualify — parseSkillMD's os.ReadFile would
