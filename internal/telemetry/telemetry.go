@@ -1011,6 +1011,13 @@ func Run(exec executor.Executor, log *progress.Logger, cfg *cli.Config) (err err
 	// payload itself can't contain the log of its own upload, so this snapshot
 	// is "session so far" by design. The deferred capture.Finalize() does the
 	// real teardown (restores os.Stderr) on return.
+	//
+	// Sync() first so lines logged right before this snapshot (the config-audit
+	// block, ending at the yarn audit) are already in the ring — a fast run
+	// otherwise outruns the async capture tee and truncates this log. The upload
+	// path re-snapshots after the upload-intent lines (see uploadToS3); this drain
+	// also covers the --telemetry-out dev dump below, which skips that re-snapshot.
+	capture.Sync()
 	execLogsBase64 := capture.SnapshotBase64()
 	endTime := time.Now()
 
@@ -1163,7 +1170,7 @@ func Run(exec executor.Executor, log *progress.Logger, cfg *cli.Config) (err err
 	// itself cannot wedge the agent indefinitely.
 	phaseCtx, phaseCancel = startPhase(runCtx, tracker, "telemetry_upload")
 	log.Progress("Requesting upload URL from backend...")
-	if err := uploadToS3(phaseCtx, log, payload, executionID, tracker); err != nil {
+	if err := uploadToS3(phaseCtx, log, payload, executionID, tracker, capture); err != nil {
 		endPhase(phaseCtx, phaseCancel, tracker, log, "telemetry_upload")
 		// Force-attach a final tail capturing the upload-failure output before
 		// returning. The deferred failure report carries no status_info (and so
@@ -1277,7 +1284,7 @@ func collectProjectRoots(nodeProjects []model.NodeScanResult, pythonProjects []m
 	return out
 }
 
-func uploadToS3(ctx context.Context, log *progress.Logger, payload *Payload, executionID string, tracker *PhaseTracker) error {
+func uploadToS3(ctx context.Context, log *progress.Logger, payload *Payload, executionID string, tracker *PhaseTracker, capture *LogCapture) error {
 	// updateDetail forwards sub-progress to the heartbeat goroutine via the
 	// tracker. Tolerates nil so the function stays callable from tests that
 	// don't supply a tracker.
@@ -1343,6 +1350,32 @@ func uploadToS3(ctx context.Context, log *progress.Logger, payload *Payload, exe
 	// Upload payload to S3 with retry. Content-Type stays application/json to
 	// match the presigned URL's signed headers — the body is gzipped JSON bytes.
 	log.Progress("Uploading telemetry to S3 (%d bytes)...", len(compressedPayload))
+
+	// Re-capture execution logs so the downloadable payload log includes the
+	// upload-intent lines just logged ("Requesting upload URL...", "Uploading
+	// telemetry to S3 (N bytes)..."). These are the last lines before the PUT;
+	// the payload can't record its own PUT result, so capture stops here. Sync()
+	// drains the async capture tee so those lines are already in the buffer when
+	// we snapshot — a fast (disk-scan) run otherwise outruns the tee and the log
+	// cuts off at the previous phase. Best-effort: a re-marshal error keeps the
+	// original body so log capture never blocks the upload. The re-marshalled
+	// body is a hair larger than the N just logged, which is cosmetic.
+	if capture != nil && payload.ExecutionLogs != nil {
+		capture.Sync()
+		payload.ExecutionLogs.OutputBase64 = capture.SnapshotBase64()
+		// The re-snapshot extends the log past the original end time (set at the
+		// pre-upload payload build), so bump EndTime to match the last captured
+		// byte — keeps execution_logs.end_time consistent with the embedded log
+		// instead of trailing it by the upload-prep window.
+		payload.ExecutionLogs.EndTime = time.Now().Unix()
+		if rebuilt, mErr := json.Marshal(payload); mErr == nil {
+			if regz, zErr := gzipBytes(rebuilt); zErr == nil {
+				payloadJSON = rebuilt
+				compressedPayload = regz
+			}
+		}
+	}
+
 	s3Client := &http.Client{Timeout: 10 * time.Minute}
 	const maxRetries = 3
 	backoffUnit := s3UploadBackoffUnit
