@@ -394,17 +394,18 @@ func TestAppliedTargetNoWrittenSettingsOmitsField(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	// Byte-shape parity: an allowlist-only record must omit written_settings.
+	// A single-key writer's record (npm: one opaque WrittenValue, no managed
+	// multi-key map) must omit written_settings on disk.
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(string(raw), "written_settings") {
-		t.Fatalf("allowlist-only record must omit written_settings:\n%s", raw)
+		t.Fatalf("single-key record must omit written_settings:\n%s", raw)
 	}
-	// And it reads back as a nil map (owns no extra keys).
+	// And it reads back as a nil map (owns no managed multi-key state).
 	got, ok := ReadAppliedState(CategoryIDEExtension, TargetVSCode)
 	if !ok || got.WrittenSettings != nil {
-		t.Fatalf("WrittenSettings must be nil for an allowlist-only record, got %+v ok=%v", got.WrittenSettings, ok)
+		t.Fatalf("WrittenSettings must be nil for a single-key record, got %+v ok=%v", got.WrittenSettings, ok)
 	}
 }

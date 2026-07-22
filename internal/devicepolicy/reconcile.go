@@ -463,19 +463,16 @@ func (r *Reconciler) enforceManaged(ctx context.Context, cat, tgt string, ep Eff
 		}
 	}
 
-	// 9. Persist ownership: what the agent now OWNS. Allowlist → WrittenValue;
-	// each extra Set key → WrittenSettings; a Remove or preserve key asserts no
-	// ownership this cycle (omitted).
-	ownedAfter := map[string]string{}
+	// 9. Persist ownership: every managed key the agent now OWNS, keyed by setting
+	// id. The allowlist is always owned (authoritative Set); a Remove or preserve
+	// key asserts no ownership this cycle (omitted). WrittenValue is the single-key
+	// path's field and is left untouched here.
+	ownedAfter := map[string]string{allowedExtensionsSettingKey: newValue}
 	if galleryOp.Set {
 		ownedAfter[galKey] = galValue
 	}
-	if len(ownedAfter) == 0 {
-		ownedAfter = nil // keep an allowlist-only record byte-identical to before
-	}
 	if err := r.persistState(cat, tgt, AppliedTargetState{
 		AppliedHash:     ep.Hash,
-		WrittenValue:    newValue,
 		WrittenSettings: ownedAfter,
 		FetchedAt:       r.now(),
 	}); err != nil {
@@ -531,16 +528,13 @@ func opConverged(op settingOp, m map[string]settingValue) bool {
 }
 
 // ownedKeys folds an ownership record into a flat map of setting id → the exact
-// value the agent last wrote, skipping empty entries. The allowlist comes from
-// WrittenValue, the other managed keys from WrittenSettings. Drift detection and
+// value the agent last wrote, skipping empty entries. Every managed key — the
+// allowlist included — lives in WrittenSettings. Drift detection and
 // ownership-gated removal act only on keys the agent actually wrote.
 func ownedKeys(prev AppliedTargetState, hadPrev bool) map[string]string {
 	owned := map[string]string{}
 	if !hadPrev {
 		return owned
-	}
-	if prev.WrittenValue != "" {
-		owned[allowedExtensionsSettingKey] = prev.WrittenValue
 	}
 	for k, v := range prev.WrittenSettings {
 		if v != "" {

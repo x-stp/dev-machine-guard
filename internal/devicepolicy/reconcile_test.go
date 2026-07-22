@@ -826,7 +826,7 @@ func TestEnforceManagedFirstEnforceWritesBothKeys(t *testing.T) {
 		t.Fatalf("report = %+v, want compliant + echoed hash", got)
 	}
 	st, ok := ReadAppliedState(CategoryIDEExtension, TargetVSCode)
-	if !ok || st.WrittenValue != samplePolicy || st.WrittenSettings[galleryServiceURLSettingKey] != galleryRaw(galURLA) {
+	if !ok || st.WrittenSettings[allowedExtensionsSettingKey] != samplePolicy || st.WrittenSettings[galleryServiceURLSettingKey] != galleryRaw(galURLA) {
 		t.Fatalf("ownership = %+v ok=%v, want allowlist + gallery owned", st, ok)
 	}
 }
@@ -838,8 +838,10 @@ func TestEnforceManagedIdempotentNoRewrite(t *testing.T) {
 	}}
 	r, rep := newManagedRec(t, policyEPGallery("sha256:H", galURLA), w)
 	if err := WriteAppliedState(CategoryIDEExtension, TargetVSCode, AppliedTargetState{
-		AppliedHash: "sha256:H", WrittenValue: samplePolicy,
-		WrittenSettings: map[string]string{galleryServiceURLSettingKey: galleryRaw(galURLA)},
+		AppliedHash: "sha256:H", WrittenSettings: map[string]string{
+			allowedExtensionsSettingKey: samplePolicy,
+			galleryServiceURLSettingKey: galleryRaw(galURLA),
+		},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -864,8 +866,10 @@ func TestEnforceManagedGalleryOnlyDriftReapplies(t *testing.T) {
 	}}
 	r, rep := newManagedRec(t, policyEPGallery("sha256:H", galURLA), w)
 	if err := WriteAppliedState(CategoryIDEExtension, TargetVSCode, AppliedTargetState{
-		AppliedHash: "sha256:H", WrittenValue: samplePolicy,
-		WrittenSettings: map[string]string{galleryServiceURLSettingKey: galleryRaw(galURLA)},
+		AppliedHash: "sha256:H", WrittenSettings: map[string]string{
+			allowedExtensionsSettingKey: samplePolicy,
+			galleryServiceURLSettingKey: galleryRaw(galURLA),
+		},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -899,7 +903,7 @@ func TestEnforceManagedAllowlistDriftReapplies(t *testing.T) {
 	}}
 	r, rep := newManagedRec(t, policyEP("sha256:H"), w)
 	if err := WriteAppliedState(CategoryIDEExtension, TargetVSCode, AppliedTargetState{
-		AppliedHash: "sha256:H", WrittenValue: samplePolicy,
+		AppliedHash: "sha256:H", WrittenSettings: map[string]string{allowedExtensionsSettingKey: samplePolicy},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -926,7 +930,7 @@ func TestEnforceManagedURLAdded(t *testing.T) {
 	}}
 	r, rep := newManagedRec(t, policyEPGallery("sha256:NEW", galURLA), w)
 	if err := WriteAppliedState(CategoryIDEExtension, TargetVSCode, AppliedTargetState{
-		AppliedHash: "sha256:OLD", WrittenValue: samplePolicy,
+		AppliedHash: "sha256:OLD", WrittenSettings: map[string]string{allowedExtensionsSettingKey: samplePolicy},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -952,8 +956,10 @@ func TestEnforceManagedURLReplaced(t *testing.T) {
 	}}
 	r, rep := newManagedRec(t, policyEPGallery("sha256:NEW", galURLB), w)
 	if err := WriteAppliedState(CategoryIDEExtension, TargetVSCode, AppliedTargetState{
-		AppliedHash: "sha256:OLD", WrittenValue: samplePolicy,
-		WrittenSettings: map[string]string{galleryServiceURLSettingKey: galleryRaw(galURLA)},
+		AppliedHash: "sha256:OLD", WrittenSettings: map[string]string{
+			allowedExtensionsSettingKey: samplePolicy,
+			galleryServiceURLSettingKey: galleryRaw(galURLA),
+		},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -980,8 +986,10 @@ func TestEnforceManagedURLRemovedWhenOwned(t *testing.T) {
 	}}
 	r, rep := newManagedRec(t, policyEP("sha256:NEW"), w)
 	if err := WriteAppliedState(CategoryIDEExtension, TargetVSCode, AppliedTargetState{
-		AppliedHash: "sha256:OLD", WrittenValue: samplePolicy,
-		WrittenSettings: map[string]string{galleryServiceURLSettingKey: galleryRaw(galURLA)},
+		AppliedHash: "sha256:OLD", WrittenSettings: map[string]string{
+			allowedExtensionsSettingKey: samplePolicy,
+			galleryServiceURLSettingKey: galleryRaw(galURLA),
+		},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1013,7 +1021,7 @@ func TestEnforceManagedURLAbsentForeignValuePreserved(t *testing.T) {
 	}}
 	r, rep := newManagedRec(t, policyEP("sha256:NEW"), w)
 	if err := WriteAppliedState(CategoryIDEExtension, TargetVSCode, AppliedTargetState{
-		AppliedHash: "sha256:OLD", WrittenValue: samplePolicy, // owns allowlist only
+		AppliedHash: "sha256:OLD", WrittenSettings: map[string]string{allowedExtensionsSettingKey: samplePolicy}, // owns allowlist only
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1030,8 +1038,8 @@ func TestEnforceManagedURLAbsentForeignValuePreserved(t *testing.T) {
 	if got := lastReport(t, rep); got.State != StateCompliant {
 		t.Fatalf("state = %q, want compliant", got.State)
 	}
-	if st, _ := ReadAppliedState(CategoryIDEExtension, TargetVSCode); st.WrittenSettings != nil {
-		t.Fatalf("agent must not claim ownership of the foreign value, got %+v", st.WrittenSettings)
+	if st, _ := ReadAppliedState(CategoryIDEExtension, TargetVSCode); st.WrittenSettings[galleryServiceURLSettingKey] != "" {
+		t.Fatalf("agent must not claim ownership of the foreign gallery value, got %+v", st.WrittenSettings)
 	}
 }
 
@@ -1046,8 +1054,10 @@ func TestClearManagedRemovesOwnedKeysLeavesForeign(t *testing.T) {
 	}}
 	r, rep := newManagedRec(t, EffectivePolicy{Category: CategoryIDEExtension, Clear: true}, w)
 	if err := WriteAppliedState(CategoryIDEExtension, TargetVSCode, AppliedTargetState{
-		AppliedHash: "sha256:H", WrittenValue: samplePolicy,
-		WrittenSettings: map[string]string{galleryServiceURLSettingKey: galleryRaw(galURLA)}, // owned A, but disk is foreign
+		AppliedHash: "sha256:H", WrittenSettings: map[string]string{
+			allowedExtensionsSettingKey: samplePolicy,
+			galleryServiceURLSettingKey: galleryRaw(galURLA), // owned A, but disk is foreign
+		},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1147,7 +1157,7 @@ func TestEnforceManagedReadbackMismatchReportsPolicyNotApplied(t *testing.T) {
 		t.Fatalf("report = %+v, want policy_not_applied + empty applied_hash", got)
 	}
 	if st, ok := ReadAppliedState(CategoryIDEExtension, TargetVSCode); !ok ||
-		st.WrittenValue != samplePolicy ||
+		st.WrittenSettings[allowedExtensionsSettingKey] != samplePolicy ||
 		st.WrittenSettings[galleryServiceURLSettingKey] != galleryRaw(galURLA) {
 		t.Fatalf("ownership must record the intended values even on readback mismatch, got %+v ok=%v", st, ok)
 	}
