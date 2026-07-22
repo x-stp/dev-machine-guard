@@ -7,11 +7,19 @@ package devicepolicy
 // needs no elevation.
 const linuxPolicyFilePath = "/etc/vscode/policy.json"
 
-// ProbeManagedPolicy reports whether an AllowedExtensions policy exists in the
-// Linux policy file.
+// ProbeManagedPolicy reports whether an AllowedExtensions or
+// ExtensionGalleryServiceUrl policy exists in the Linux policy file.
 func ProbeManagedPolicy() (bool, string) {
-	if jsonFileHasKey(linuxPolicyFilePath, allowedExtensionsName) {
-		return true, linuxPolicyFilePath + " [" + allowedExtensionsName + "]"
+	return probeLinuxPolicyFile(linuxPolicyFilePath)
+}
+
+// probeLinuxPolicyFile is ProbeManagedPolicy parameterized over the policy-file
+// path so tests can stage a fixture instead of touching /etc.
+func probeLinuxPolicyFile(path string) (bool, string) {
+	for _, name := range managedPolicyNames() {
+		if jsonFileHasKey(path, name) {
+			return true, path + " [" + name + "]"
+		}
 	}
 	return false, ""
 }

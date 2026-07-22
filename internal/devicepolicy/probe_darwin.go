@@ -14,10 +14,10 @@ const (
 )
 
 // ProbeManagedPolicy reports whether an MDM-installed VS Code managed
-// preference mentions AllowedExtensions, machine-wide or for any user. The
-// plists are typically binary, but plist key names are stored as plain ASCII
-// runs in both binary and XML encodings, so a byte scan is a reliable
-// presence check without a plist parser dependency.
+// preference mentions AllowedExtensions or ExtensionGalleryServiceUrl,
+// machine-wide or for any user. The plists are typically binary, but plist key
+// names are stored as plain ASCII runs in both binary and XML encodings, so a
+// byte scan is a reliable presence check without a plist parser dependency.
 func ProbeManagedPolicy() (bool, string) {
 	return probeDarwinManagedPrefs(darwinManagedPrefsDir)
 }
@@ -29,8 +29,10 @@ func probeDarwinManagedPrefs(root string) (bool, string) {
 	perUser, _ := filepath.Glob(filepath.Join(root, "*", darwinVSCodePlistName))
 	candidates = append(candidates, perUser...)
 	for _, p := range candidates {
-		if fileMentionsKey(p, allowedExtensionsName) {
-			return true, p + " [" + allowedExtensionsName + "]"
+		for _, name := range managedPolicyNames() {
+			if fileMentionsKey(p, name) {
+				return true, p + " [" + name + "]"
+			}
 		}
 	}
 	return false, ""

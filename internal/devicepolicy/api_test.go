@@ -80,6 +80,37 @@ func TestFetchClear(t *testing.T) {
 	}
 }
 
+func TestFetchLiftsGalleryServiceURL(t *testing.T) {
+	// A policy carrying gallery_service_url lifts it into EffectivePolicy; the
+	// hash is unchanged in shape (backend folds the URL into it).
+	body := `{"policy":{"category":"ide_extension","target":"vscode","clear":false,` +
+		`"policy":{"*":false},"hash":"sha256:g","gallery_service_url":"https://mkt.example/api/v1",` +
+		`"generated_at":"2026-07-23T00:00:00Z"}}`
+	_, f := newFetchServer(t, 200, body)
+	ep, err := f.Fetch(context.Background(), "cust", "dev-1", CategoryIDEExtension, TargetVSCode)
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if ep.GalleryServiceURL != "https://mkt.example/api/v1" {
+		t.Fatalf("gallery_service_url = %q, want the URL", ep.GalleryServiceURL)
+	}
+}
+
+func TestFetchAbsentGalleryServiceURLIsEmpty(t *testing.T) {
+	// A policy without gallery_service_url (the common allowlist-only case)
+	// leaves the field empty and is not an error.
+	body := `{"policy":{"category":"ide_extension","clear":false,` +
+		`"policy":{"*":false},"hash":"sha256:h","generated_at":"2026-07-23T00:00:00Z"}}`
+	_, f := newFetchServer(t, 200, body)
+	ep, err := f.Fetch(context.Background(), "cust", "dev-1", CategoryIDEExtension, TargetVSCode)
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if ep.GalleryServiceURL != "" {
+		t.Fatalf("gallery_service_url should be empty, got %q", ep.GalleryServiceURL)
+	}
+}
+
 func TestFetchAbsentPolicyReturnsEmptyNoError(t *testing.T) {
 	// An omitted/null `policy` means run-config carried no directive for this
 	// category. It is NOT an error and NOT a clear: Fetch returns a zero

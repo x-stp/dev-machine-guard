@@ -48,12 +48,13 @@ const maxRunConfigBytes = 4 << 20
 // means run-config carried no directive for this category/target → reconciler
 // no-op.
 type EffectivePolicy struct {
-	Category    string
-	Target      string
-	Clear       bool
-	Policy      json.RawMessage
-	Hash        string
-	GeneratedAt string
+	Category          string
+	Target            string
+	Clear             bool
+	Policy            json.RawMessage
+	Hash              string
+	GeneratedAt       string
+	GalleryServiceURL string
 }
 
 // present reports whether the backend expressed a policy directive for this
@@ -68,12 +69,13 @@ func (ep EffectivePolicy) present() bool { return ep.Clear || len(ep.Policy) > 0
 // backend still emitting legacy extras (e.g. the removed min_vscode_version)
 // stays compatible.
 type policyEnvelope struct {
-	Category    string          `json:"category"`
-	Target      string          `json:"target"`
-	Clear       bool            `json:"clear"`
-	Policy      json.RawMessage `json:"policy,omitempty"`
-	Hash        string          `json:"hash,omitempty"`
-	GeneratedAt string          `json:"generated_at"`
+	Category          string          `json:"category"`
+	Target            string          `json:"target"`
+	Clear             bool            `json:"clear"`
+	Policy            json.RawMessage `json:"policy,omitempty"`
+	Hash              string          `json:"hash,omitempty"`
+	GeneratedAt       string          `json:"generated_at"`
+	GalleryServiceURL string          `json:"gallery_service_url,omitempty"`
 }
 
 // Fetcher returns the effective policy for one device + category + target.
@@ -192,12 +194,13 @@ func (c *HTTPFetcher) Fetch(ctx context.Context, customerID, deviceID, category,
 	p := env.Policy
 
 	ep := EffectivePolicy{
-		Category:    strings.TrimSpace(p.Category),
-		Target:      strings.TrimSpace(p.Target),
-		Clear:       p.Clear,
-		Policy:      p.Policy,
-		Hash:        strings.TrimSpace(p.Hash),
-		GeneratedAt: p.GeneratedAt,
+		Category:          strings.TrimSpace(p.Category),
+		Target:            strings.TrimSpace(p.Target),
+		Clear:             p.Clear,
+		Policy:            p.Policy,
+		Hash:              strings.TrimSpace(p.Hash),
+		GeneratedAt:       p.GeneratedAt,
+		GalleryServiceURL: strings.TrimSpace(p.GalleryServiceURL),
 	}
 	if ep.Category == "" {
 		ep.Category = category

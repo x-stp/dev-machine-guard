@@ -25,10 +25,11 @@ type registryProbe struct {
 	path string
 }
 
-// ProbeManagedPolicy reports whether an AllowedExtensions value of ANY
-// registry type exists under the VS Code policy key in HKLM or HKCU. Type
-// does not matter: VS Code's policy service claims the setting as soon as the
-// value exists, so a wrong-typed value still outranks user settings.
+// ProbeManagedPolicy reports whether an AllowedExtensions or
+// ExtensionGalleryServiceUrl value of ANY registry type exists under the VS
+// Code policy key in HKLM or HKCU. Type does not matter: VS Code's policy
+// service claims the setting as soon as the value exists, so a wrong-typed
+// value still outranks user settings.
 func ProbeManagedPolicy() (bool, string) {
 	return probeRegistryLocations([]registryProbe{
 		{registry.LOCAL_MACHINE, "HKLM", windowsPolicyKeyPath},
@@ -59,11 +60,14 @@ func probeRegistry(loc registryProbe) (bool, string) {
 
 	// GetValue with a nil buffer asks only for existence/metadata. Any error
 	// other than ErrNotExist still proves the value exists or the key is
-	// unreadable; only a clean not-exists reads as unmanaged.
-	if _, _, err := k.GetValue(allowedExtensionsName, nil); err != nil {
-		if errors.Is(err, registry.ErrNotExist) {
-			return false, ""
+	// unreadable; only a clean not-exists reads as unmanaged. Check each managed
+	// policy name; the first present one wins (AllowedExtensions preferred in
+	// the detail).
+	for _, name := range managedPolicyNames() {
+		if _, _, err := k.GetValue(name, nil); errors.Is(err, registry.ErrNotExist) {
+			continue
 		}
+		return true, loc.name + `\` + loc.path + ` [` + name + `]`
 	}
-	return true, loc.name + `\` + loc.path + ` [` + allowedExtensionsName + `]`
+	return false, ""
 }

@@ -59,3 +59,37 @@ func TestFileMentionsKey(t *testing.T) {
 		t.Error("missing file: want false")
 	}
 }
+
+// TestProbeHelpersDetectEitherPolicyName exercises the shared probe helpers
+// against the gallery policy name (the per-OS ProbeManagedPolicy loops over
+// managedPolicyNames, so proving both names are detectable + the name set is
+// the linux/darwin either-key coverage that runs on any OS).
+func TestProbeHelpersDetectEitherPolicyName(t *testing.T) {
+	dir := t.TempDir()
+
+	// jsonFileHasKey (linux policy.json shape) finds the gallery policy name.
+	p := filepath.Join(dir, "policy.json")
+	if err := os.WriteFile(p, []byte(`{"ExtensionGalleryServiceUrl":"https://mkt.example/api/v1"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !jsonFileHasKey(p, galleryServiceURLName) {
+		t.Error("jsonFileHasKey must detect ExtensionGalleryServiceUrl")
+	}
+	if jsonFileHasKey(p, allowedExtensionsName) {
+		t.Error("AllowedExtensions absent → false")
+	}
+
+	// fileMentionsKey (darwin plist byte scan) finds it too.
+	plist := filepath.Join(dir, "vscode.plist")
+	if err := os.WriteFile(plist, append([]byte("bplist00\x00"), []byte("ExtensionGalleryServiceUrl\x00")...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !fileMentionsKey(plist, galleryServiceURLName) {
+		t.Error("fileMentionsKey must detect ExtensionGalleryServiceUrl")
+	}
+
+	// managedPolicyNames covers both, allowlist first (reporting preference).
+	if names := managedPolicyNames(); len(names) != 2 || names[0] != allowedExtensionsName || names[1] != galleryServiceURLName {
+		t.Fatalf("managedPolicyNames = %v", names)
+	}
+}

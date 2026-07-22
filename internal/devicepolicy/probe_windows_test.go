@@ -65,6 +65,19 @@ func TestProbeRegistry(t *testing.T) {
 	if managed, _ := probeRegistry(hkcuProbe("HKCU", testPolicyKeyPath)); !managed {
 		t.Fatal("dword value present: want managed=true")
 	}
+
+	// Gallery-only: remove AllowedExtensions, set ExtensionGalleryServiceUrl →
+	// still managed (either key yields), reported under the gallery name.
+	if err := k.DeleteValue(allowedExtensionsName); err != nil {
+		t.Fatal(err)
+	}
+	if err := k.SetStringValue(galleryServiceURLName, "https://mkt.example/api/v1"); err != nil {
+		t.Fatal(err)
+	}
+	managed, detail = probeRegistry(hkcuProbe("HKCU", testPolicyKeyPath))
+	if !managed || !strings.Contains(detail, galleryServiceURLName) {
+		t.Fatalf("gallery-only: want managed=true with gallery detail, got (%v, %q)", managed, detail)
+	}
 }
 
 func TestProbeRegistryLocationsFallsBackToSecond(t *testing.T) {

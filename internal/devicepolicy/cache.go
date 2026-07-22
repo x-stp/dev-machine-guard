@@ -51,7 +51,7 @@ type AppliedCategoryState struct {
 }
 
 // AppliedTargetState records what the agent last wrote to the user-scope VS
-// Code settings.json for one (category, target). Two fields drive correctness:
+// Code settings.json for one (category, target). Three fields drive correctness:
 //
 //   - AppliedHash is the backend's content hash, stored VERBATIM (never
 //     recomputed). Compared against the freshly-fetched hash for idempotency.
@@ -61,13 +61,21 @@ type AppliedCategoryState struct {
 //     WrittenValue (a differing value — e.g. the user's own — is left
 //     untouched); on enforce, an on-disk value differing from WrittenValue is
 //     drift and is converged back.
+//   - WrittenSettings holds the same value-based ownership for the other
+//     managed settings keys (the gallery service URL): setting id → the exact
+//     compacted value the agent wrote. A key absent from the map is one the
+//     agent does not own, so removal and clear leave it untouched — as an empty
+//     WrittenValue does for the allowlist. The allowlist stays in WrittenValue,
+//     and omitempty drops the map, so an allowlist-only record is unchanged on
+//     disk.
 //
 // A zero-value entry means "the agent owns nothing on disk" for that
 // category/target.
 type AppliedTargetState struct {
-	AppliedHash  string    `json:"applied_hash"`
-	WrittenValue string    `json:"written_value"`
-	FetchedAt    time.Time `json:"fetched_at"`
+	AppliedHash     string            `json:"applied_hash"`
+	WrittenValue    string            `json:"written_value"`
+	WrittenSettings map[string]string `json:"written_settings,omitempty"`
+	FetchedAt       time.Time         `json:"fetched_at"`
 }
 
 // cacheMu serializes the read-modify-write of the shared state file so two

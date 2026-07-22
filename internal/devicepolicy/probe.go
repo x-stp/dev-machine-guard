@@ -17,11 +17,29 @@ import (
 // would be ignored.
 const allowedExtensionsName = "AllowedExtensions"
 
-// ProbeManagedPolicy (probe_<os>.go) reports whether an MDM/admin-managed
-// AllowedExtensions policy is present at this OS's policy location, plus a
-// human-readable location for logs. Read-only, never elevated, and
-// best-effort: an unreadable location reads as "not managed" — enforcement
-// must not be blocked by a probe that cannot decide.
+// galleryServiceURLName is VS Code's registered POLICY name for the
+// `extensions.gallery.serviceUrl` setting — the registry value name on Windows,
+// the JSON key in /etc/vscode/policy.json on Linux, and the plist key in macOS
+// managed preferences. Like allowedExtensionsName it is the POLICY name probed
+// read-only at OS policy locations, NOT the setting id the agent writes
+// (galleryServiceURLSettingKey).
+const galleryServiceURLName = "ExtensionGalleryServiceUrl"
+
+// managedPolicyNames are the VS Code POLICY names whose presence makes the
+// agent yield the whole ide_extension category (mdm_managed). An MDM/admin
+// policy for EITHER key means a higher-precedence surface owns this category,
+// so the agent never half-owns it alongside an MDM. Presence-only, not a value
+// comparison. Order is the reporting preference for the log detail.
+func managedPolicyNames() []string {
+	return []string{allowedExtensionsName, galleryServiceURLName}
+}
+
+// ProbeManagedPolicy (probe_<os>.go) reports whether an MDM/admin-managed VS
+// Code policy (AllowedExtensions or ExtensionGalleryServiceUrl) is present at
+// this OS's policy location, plus a human-readable location for logs.
+// Read-only, never elevated, and best-effort: an unreadable location reads as
+// "not managed" — enforcement must not be blocked by a probe that cannot
+// decide.
 
 // jsonFileHasKey reports whether the JSON object file at path contains key as
 // a top-level member. Falls back to a byte scan for `"key"` when the file is
