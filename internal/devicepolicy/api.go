@@ -39,43 +39,43 @@ const maxRunConfigBytes = 4 << 20
 
 // EffectivePolicy is the parsed device-policy directive, lifted from the
 // `policy` sub-object of the run-config response (it mirrors agent-api's
-// EffectivePolicyResponse). Policy carries the compiled VS Code
-// extensions.allowed object as canonical JSON (sorted keys) — the exact bytes
-// the backend hashed — so the agent writes it verbatim and never re-serializes
+// EffectivePolicyResponse). Policy is the settings map: VS Code setting id
+// (e.g. "extensions.allowed", "extensions.gallery.serviceUrl") → that setting's
+// compiled value as canonical JSON — the exact bytes the backend hashed. The
+// agent writes each value verbatim and never re-serializes
 // (re-serialization could reorder keys and break the backend's byte-exact
-// applied==desired check). Policy identity is (Category, Target); Target
-// defaults to vscode for ide_extension. A zero EffectivePolicy (present()==false)
-// means run-config carried no directive for this category/target → reconciler
-// no-op.
+// applied==desired check). extensions.allowed is always present; other keys
+// appear only when the policy sets them. Policy identity is (Category, Target);
+// Target defaults to vscode for ide_extension. A zero EffectivePolicy
+// (present()==false) means run-config carried no directive for this
+// category/target → reconciler no-op.
 type EffectivePolicy struct {
-	Category          string
-	Target            string
-	Clear             bool
-	Policy            json.RawMessage
-	Hash              string
-	GeneratedAt       string
-	GalleryServiceURL string
+	Category    string
+	Target      string
+	Clear       bool
+	Policy      map[string]json.RawMessage
+	Hash        string
+	GeneratedAt string
 }
 
 // present reports whether the backend expressed a policy directive for this
 // category — a value to enforce, or an explicit clear. The fetcher guarantees
-// clear=false ⇒ non-empty policy object, so the only successful-fetch state
+// clear=false ⇒ a non-empty settings map, so the only successful-fetch state
 // with neither is "no policy in run-config" (absent), which the reconciler
 // treats as a no-op (NEVER a clear).
 func (ep EffectivePolicy) present() bool { return ep.Clear || len(ep.Policy) > 0 }
 
 // policyEnvelope is the wire shape of the run-config `policy` sub-object (must
-// match agent-api EffectivePolicyResponse). Unknown fields are ignored, so a
-// backend still emitting legacy extras (e.g. the removed min_vscode_version)
-// stays compatible.
+// match agent-api EffectivePolicyResponse). `policy` is the settings map
+// (setting id → compiled value). Unknown fields are ignored, so a backend
+// emitting extra fields the agent does not model stays compatible.
 type policyEnvelope struct {
-	Category          string          `json:"category"`
-	Target            string          `json:"target"`
-	Clear             bool            `json:"clear"`
-	Policy            json.RawMessage `json:"policy,omitempty"`
-	Hash              string          `json:"hash,omitempty"`
-	GeneratedAt       string          `json:"generated_at"`
-	GalleryServiceURL string          `json:"gallery_service_url,omitempty"`
+	Category    string                     `json:"category"`
+	Target      string                     `json:"target"`
+	Clear       bool                       `json:"clear"`
+	Policy      map[string]json.RawMessage `json:"policy,omitempty"`
+	Hash        string                     `json:"hash,omitempty"`
+	GeneratedAt string                     `json:"generated_at"`
 }
 
 // Fetcher returns the effective policy for one device + category + target.
@@ -120,8 +120,9 @@ func NewHTTPFetcher(cfg ingest.Config, h *http.Client) (*HTTPFetcher, bool) {
 //   - body that is not valid JSON → error;
 //   - a non-clear result missing policy or hash → error (a malformed policy
 //     must not be written, and must not be mistaken for a clear);
-//   - a non-clear policy that is not itself a JSON object → error (a string or
-//     array written verbatim could even read back "compliant").
+//   - a non-clear result whose `policy` is not a JSON object → error: it must
+//     decode as a setting id → value map, so a string/array/scalar in its place
+//     fails the decode above and no-ops the reconciler.
 //
 // An omitted/null `policy` is NOT an error: it means run-config carried no
 // directive for this category/target (a degraded/rules-only response, an older
@@ -194,13 +195,12 @@ func (c *HTTPFetcher) Fetch(ctx context.Context, customerID, deviceID, category,
 	p := env.Policy
 
 	ep := EffectivePolicy{
-		Category:          strings.TrimSpace(p.Category),
-		Target:            strings.TrimSpace(p.Target),
-		Clear:             p.Clear,
-		Policy:            p.Policy,
-		Hash:              strings.TrimSpace(p.Hash),
-		GeneratedAt:       p.GeneratedAt,
-		GalleryServiceURL: strings.TrimSpace(p.GalleryServiceURL),
+		Category:    strings.TrimSpace(p.Category),
+		Target:      strings.TrimSpace(p.Target),
+		Clear:       p.Clear,
+		Policy:      p.Policy,
+		Hash:        strings.TrimSpace(p.Hash),
+		GeneratedAt: p.GeneratedAt,
 	}
 	if ep.Category == "" {
 		ep.Category = category
@@ -209,22 +209,32 @@ func (c *HTTPFetcher) Fetch(ctx context.Context, customerID, deviceID, category,
 		ep.Target = target
 	}
 	if !ep.Clear {
+		// A non-clear directive must carry a settings map and a hash. The map's
+		// object shape is already guaranteed: a non-object `policy` fails to
+		// decode into the map above and returns a decode error, so a
+		// string/array/scalar never reaches here.
 		if len(ep.Policy) == 0 || ep.Hash == "" {
 			return EffectivePolicy{}, errors.New("devicepolicy: malformed policy: clear=false but policy or hash missing")
 		}
-		// The compiled policy is always a JSON object. Shape is checked here so a
-		// malformed payload no-ops at the reconciler; value-level validation stays
-		// backend-owned.
-		if !isJSONObject(ep.Policy) {
-			return EffectivePolicy{}, errors.New("devicepolicy: malformed policy: policy is not a JSON object")
+		// extensions.allowed is the mandatory core of every ide_extension policy:
+		// it MUST be present and a JSON object. This rejects an allowlist-missing
+		// settings map (e.g. a gallery-only response) before it can be written and
+		// read back "compliant". Other keys stay backend-owned — their values are
+		// heterogeneous (the allowlist an object, the gallery URL a string).
+		allow, ok := ep.Policy[allowedExtensionsSettingKey]
+		if !ok {
+			return EffectivePolicy{}, errors.New("devicepolicy: malformed policy: settings missing " + allowedExtensionsSettingKey)
+		}
+		if !isJSONObject(allow) {
+			return EffectivePolicy{}, errors.New("devicepolicy: malformed policy: " + allowedExtensionsSettingKey + " is not a JSON object")
 		}
 	}
 	return ep, nil
 }
 
-// isJSONObject reports whether raw's first JSON token opens an object. The
-// envelope already passed json.Unmarshal, so raw is syntactically valid JSON —
-// only the shape needs checking.
+// isJSONObject reports whether raw's first JSON token opens an object. Callers
+// pass syntactically valid JSON (decoded by json.Unmarshal, or json.Valid-checked
+// first), so only the shape needs checking.
 func isJSONObject(raw json.RawMessage) bool {
 	for _, b := range raw {
 		switch b {

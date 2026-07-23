@@ -600,30 +600,33 @@ func TestApplyManagedRejectsInvalidJSONValue(t *testing.T) {
 	}
 }
 
-// TestManagedGalleryValueRoundTrips pins the ownership invariant: the value the
-// reconciler writes and records (managedGalleryValue) must equal what a
-// write→read round-trip returns, or ownership/convergence would churn forever.
-// Includes a URL with &, =, <, > — the HTML-escaping edge.
-func TestManagedGalleryValueRoundTrips(t *testing.T) {
-	for _, url := range []string{
-		"https://mkt.example/api/v1",
-		"https://mkt.example/api/v1?tenant=acme&mode=strict",
-		"https://mkt.example/p/<odd>",
+// TestGalleryValueRoundTrips pins the ownership invariant on the value path the
+// reconciler now uses: the gallery URL arrives as a JSON string in the settings
+// map, is compacted (compactSettings), written, and recorded as owned — and that
+// value must equal what a write→read round-trip returns, or ownership /
+// convergence would churn forever. Includes a URL with &, =, <, > — the
+// HTML-escaping edge (canonical JSON must not HTML-escape; json.Compact and the
+// JSONC writer both preserve the literal token byte-for-byte).
+func TestGalleryValueRoundTrips(t *testing.T) {
+	for _, wire := range []string{
+		`"https://mkt.example/api/v1"`,
+		`"https://mkt.example/api/v1?tenant=acme&mode=strict"`,
+		`"https://mkt.example/p/<odd>"`,
 	} {
 		w, _ := newTestSettingsWriter(t)
-		gv, err := managedGalleryValue(url)
+		gv, err := compactJSON([]byte(wire))
 		if err != nil {
-			t.Fatalf("managedGalleryValue(%q): %v", url, err)
+			t.Fatalf("compactJSON(%s): %v", wire, err)
 		}
 		if _, err := w.ApplyManaged([]settingOp{{Key: galleryServiceURLSettingKey, Set: true, Value: json.RawMessage(gv)}}); err != nil {
-			t.Fatalf("ApplyManaged(%q): %v", url, err)
+			t.Fatalf("ApplyManaged(%s): %v", wire, err)
 		}
 		got, err := w.ReadManaged([]string{galleryServiceURLSettingKey})
 		if err != nil {
 			t.Fatal(err)
 		}
 		if sv := got[galleryServiceURLSettingKey]; !sv.Present || sv.Raw != gv {
-			t.Fatalf("url %q: readback Raw=%q, want %q (owned value must equal readback)", url, sv.Raw, gv)
+			t.Fatalf("wire %s: readback Raw=%q, want %q (owned value must equal readback)", wire, sv.Raw, gv)
 		}
 	}
 }

@@ -1,11 +1,11 @@
 package devicepolicy
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 )
 
@@ -179,18 +179,20 @@ func (r *Reconciler) clearSingle(cat, tgt string, prev AppliedTargetState, hadPr
 }
 
 // clearManaged is the managed multi-key unassignment path. It removes each
-// managed key INDEPENDENTLY, and only when its on-disk value still equals what
-// the agent wrote (per-key ownership); a foreign-valued or absent key is
-// preserved. One atomic write carries only the owned-key removes.
+// agent-OWNED key INDEPENDENTLY, and only when its on-disk value still equals
+// what the agent wrote (per-key ownership); a foreign-valued or absent key is
+// preserved. The candidate set is exactly the recorded ownership (not a static
+// key list), so any key the agent ever wrote is cleared without code change.
+// One atomic write carries only the owned-key removes.
 func (r *Reconciler) clearManaged(cat, tgt string, prev AppliedTargetState, hadPrev bool, mw managedSettingsWriter) error {
-	keys := managedKeys()
+	owned := ownedKeys(prev, hadPrev)
+	keys := sortedKeys(owned) // only owned keys can be removed; sorted → deterministic
 	cur, err := mw.ReadManaged(keys)
 	if err != nil {
 		return fmt.Errorf("devicepolicy: clear: read %s: %w", r.Writer.Location(), err)
 	}
-	owned := ownedKeys(prev, hadPrev)
 	var ops []settingOp
-	for _, key := range keys { // fixed order → deterministic write
+	for _, key := range keys {
 		ov := owned[key]
 		if ov != "" && cur[key].Present && cur[key].Raw == ov {
 			ops = append(ops, settingOp{Key: key, Remove: true})
@@ -236,13 +238,15 @@ func (r *Reconciler) dropClearedState(cat, tgt string, hadPrev bool) error {
 //	→ persist ownership on every successful write (rollback if that fails)
 //	→ Verify → report (drift upgrades a would-be compliant to drift_detected)
 func (r *Reconciler) handleEnforce(ctx context.Context, cat, tgt string, ep EffectivePolicy) error {
-	// The compiled allowlist compacted: the canonical comparison form for
-	// readback, idempotency, and ownership. (The backend's hash still travels
-	// verbatim; only the value bytes are normalized for comparison.)
-	newValue, err := compactJSON(ep.Policy)
+	// Compact every value in the settings map to its canonical comparison form
+	// (setting id → compacted value): the form used for readback, idempotency,
+	// and ownership. (The backend's hash still travels verbatim; only the value
+	// bytes are normalized for comparison.)
+	desired, err := compactSettings(ep.Policy)
 	if err != nil {
-		// Defensive: the fetcher already validated object shape, so this is a
-		// malformed-payload class failure → no-op, never write.
+		// Defensive: the fetcher already validated the settings map decodes, so a
+		// value that will not compact is a malformed-payload class failure → no-op,
+		// never write.
 		return fmt.Errorf("devicepolicy: enforce: compact policy: %w", err)
 	}
 
@@ -256,7 +260,21 @@ func (r *Reconciler) handleEnforce(ctx context.Context, cat, tgt string, ep Effe
 	}
 
 	if mw, ok := r.Writer.(managedSettingsWriter); ok {
-		return r.enforceManaged(ctx, cat, tgt, ep, newValue, mw)
+		return r.enforceManaged(ctx, cat, tgt, ep, desired, mw)
+	}
+	// Single-key fallback: a plain Writer manages only extensions.allowed; other
+	// settings need the managed writer. The production settings writer is always
+	// managed, so this path is the fake/degraded case.
+	newValue, ok := desired[allowedExtensionsSettingKey]
+	if !ok {
+		_ = r.report(ctx, cat, tgt, StateVerificationFailed, "")
+		return fmt.Errorf("devicepolicy: enforce: settings missing %q for single-key writer", allowedExtensionsSettingKey)
+	}
+	if len(desired) > 1 {
+		// A multi-key policy on a single-key writer enforces only the allowlist;
+		// surface it so a partial-enforce is never invisible.
+		r.logf("devicepolicy: single-key writer at %s enforces only %s; %d other setting(s) dropped",
+			r.Writer.Location(), allowedExtensionsSettingKey, len(desired)-1)
 	}
 	return r.enforceSingle(ctx, cat, tgt, ep, newValue)
 }
@@ -348,57 +366,51 @@ func (r *Reconciler) enforceSingle(ctx context.Context, cat, tgt string, ep Effe
 	return r.report(ctx, cat, tgt, state, appliedHash)
 }
 
-// enforceManaged is the managed multi-key convergence path. The allowlist is
-// always authoritative (Set); the gallery URL is Set when the policy carries
-// one, else an ownership-gated Remove (only a value the agent itself wrote),
-// else preserved (a foreign or absent value is never deleted).
-func (r *Reconciler) enforceManaged(ctx context.Context, cat, tgt string, ep EffectivePolicy, newValue string, mw managedSettingsWriter) error {
+// enforceManaged is the managed multi-key convergence path. It is fully driven
+// by the settings map: every setting the backend sent is authoritatively Set,
+// and any key the agent previously owned that is NO LONGER in the map is an
+// ownership-gated Remove (only a value the agent itself wrote), else preserved
+// (a foreign or absent value is never deleted). No setting id is special-cased,
+// so a new managed key rides through with no change here.
+func (r *Reconciler) enforceManaged(ctx context.Context, cat, tgt string, ep EffectivePolicy, desired map[string]string, mw managedSettingsWriter) error {
 	prev, hadPrev := ReadAppliedState(cat, tgt)
 	owned := ownedKeys(prev, hadPrev)
 
-	// 1. Read the managed keys up front.
-	keys := managedKeys()
+	// 1. Read every key this cycle may touch: the union of the settings map's keys
+	// (to Set) and the owned keys (Set again, or an ownership-gated Remove when a
+	// key has left the map). Sorted so reads, convergence, and writes are
+	// deterministic.
+	keys := sortedUnion(desired, owned)
 	cur, err := mw.ReadManaged(keys)
 	if err != nil {
 		_ = r.report(ctx, cat, tgt, StateVerificationFailed, "")
 		return fmt.Errorf("devicepolicy: enforce: read %s: %w", r.Writer.Location(), err)
 	}
 
-	// 2. Build the desired end-state ops. Allowlist is ALWAYS Set. The gallery
-	// op is decided from the policy URL and per-key ownership.
-	galValue, err := managedGalleryValue(ep.GalleryServiceURL)
-	if err != nil {
-		// Defensive: encoding a validated URL string cannot fail in practice.
-		// If it ever did, nothing has been written — report verification_failed
-		// symmetrically with the ReadManaged-error path above.
-		_ = r.report(ctx, cat, tgt, StateVerificationFailed, "")
-		return fmt.Errorf("devicepolicy: enforce: encode gallery url: %w", err)
+	// 2. Build the desired end-state ops, one per key in the union:
+	//   - present in the settings map          → Set to its compiled value;
+	//   - owned, gone from the map, and its
+	//     on-disk value still matches           → ownership-gated Remove;
+	//   - otherwise (foreign or absent value)   → preserve (never delete).
+	ops := make([]settingOp, 0, len(keys))
+	for _, key := range keys {
+		if v, ok := desired[key]; ok {
+			ops = append(ops, settingOp{Key: key, Set: true, Value: json.RawMessage(v)})
+			continue
+		}
+		if ov := owned[key]; ov != "" && cur[key].Present && cur[key].Raw == ov {
+			ops = append(ops, settingOp{Key: key, Remove: true})
+		} else {
+			ops = append(ops, settingOp{Key: key})
+		}
 	}
-	desired := []settingOp{{Key: allowedExtensionsSettingKey, Set: true, Value: json.RawMessage(newValue)}}
-
-	galKey := galleryServiceURLSettingKey
-	var galleryOp settingOp
-	switch {
-	case ep.GalleryServiceURL != "":
-		// Authoritative: set the gallery key to the policy's URL.
-		galleryOp = settingOp{Key: galKey, Set: true, Value: json.RawMessage(galValue)}
-	case owned[galKey] != "" && cur[galKey].Present && cur[galKey].Raw == owned[galKey]:
-		// No URL and the on-disk value is the one the agent wrote → remove it
-		// (ownership-gated).
-		galleryOp = settingOp{Key: galKey, Remove: true}
-	default:
-		// No URL and either no ownership record or a foreign value on disk →
-		// preserve (never delete a value the agent did not write).
-		galleryOp = settingOp{Key: galKey}
-	}
-	desired = append(desired, galleryOp)
 
 	// 3. Convergence over the FULL desired end-state, computed BEFORE the
-	// idempotency short-circuit. It covers every managed key, so gallery-only
-	// drift with an unchanged hash re-applies rather than short-circuiting to
+	// idempotency short-circuit. It covers every managed key, so drift on any one
+	// key with an unchanged hash re-applies rather than short-circuiting to
 	// compliant.
 	converged := true
-	for _, op := range desired {
+	for _, op := range ops {
 		if !opConverged(op, cur) {
 			converged = false
 			break
@@ -441,8 +453,8 @@ func (r *Reconciler) enforceManaged(ctx context.Context, cat, tgt string, ep Eff
 
 	// 7. Write the mutating ops in one atomic patch; a preserve contributes
 	// nothing.
-	writeOps := make([]settingOp, 0, len(desired))
-	for _, op := range desired {
+	writeOps := make([]settingOp, 0, len(ops))
+	for _, op := range ops {
 		if op.Set || op.Remove {
 			writeOps = append(writeOps, op)
 		}
@@ -463,13 +475,13 @@ func (r *Reconciler) enforceManaged(ctx context.Context, cat, tgt string, ep Eff
 		}
 	}
 
-	// 9. Persist ownership: every managed key the agent now OWNS, keyed by setting
-	// id. The allowlist is always owned (authoritative Set); a Remove or preserve
-	// key asserts no ownership this cycle (omitted). WrittenValue is the single-key
-	// path's field and is left untouched here.
-	ownedAfter := map[string]string{allowedExtensionsSettingKey: newValue}
-	if galleryOp.Set {
-		ownedAfter[galKey] = galValue
+	// 9. Persist ownership: every key the agent Set this cycle (i.e. the whole
+	// settings map), keyed by setting id → the exact value written. A Remove or
+	// preserve key asserts no ownership this cycle (omitted). WrittenValue is the
+	// single-key path's field and is left untouched here.
+	ownedAfter := make(map[string]string, len(desired))
+	for key, v := range desired {
+		ownedAfter[key] = v
 	}
 	if err := r.persistState(cat, tgt, AppliedTargetState{
 		AppliedHash:     ep.Hash,
@@ -505,11 +517,51 @@ func (r *Reconciler) enforceManaged(ctx context.Context, cat, tgt string, ep Eff
 	return r.report(ctx, cat, tgt, state, appliedHash)
 }
 
-// managedKeys is the fixed, ordered set of VS Code settings.json keys the IDE
-// reconciler manages. The order is stable so reads, convergence, and writes are
-// deterministic.
-func managedKeys() []string {
-	return []string{allowedExtensionsSettingKey, galleryServiceURLSettingKey}
+// compactSettings compacts every value in the settings map to its canonical
+// comparison form, returning setting id → compacted value. Compaction
+// normalizes whitespace so on-disk readback and next-cycle ownership compare
+// byte-exactly regardless of the backend's wire formatting; member order within
+// each value is preserved (it is the backend's canonical, hashed order).
+func compactSettings(settings map[string]json.RawMessage) (map[string]string, error) {
+	out := make(map[string]string, len(settings))
+	for k, raw := range settings {
+		c, err := compactJSON(raw)
+		if err != nil {
+			return nil, fmt.Errorf("devicepolicy: compact policy key %q: %w", k, err)
+		}
+		out[k] = c
+	}
+	return out, nil
+}
+
+// sortedUnion returns the sorted union of two key sets — every settings key a
+// cycle may touch (a Set from the settings map, or an ownership-gated
+// Remove/preserve for an owned key no longer in it). The stable order makes
+// reads, convergence, writes, and logs deterministic.
+func sortedUnion(a, b map[string]string) []string {
+	set := make(map[string]struct{}, len(a)+len(b))
+	for k := range a {
+		set[k] = struct{}{}
+	}
+	for k := range b {
+		set[k] = struct{}{}
+	}
+	keys := make([]string, 0, len(set))
+	for k := range set {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// sortedKeys returns m's keys in sorted order, for a deterministic write.
+func sortedKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // opConverged reports whether on-disk state m already satisfies op: a Set
@@ -542,27 +594,6 @@ func ownedKeys(prev AppliedTargetState, hadPrev bool) map[string]string {
 		}
 	}
 	return owned
-}
-
-// managedGalleryValue returns the compacted JSON-string encoding of a gallery
-// URL — the exact bytes written to settings.json AND recorded as owned, so the
-// readback and the next-cycle ownership comparison are canonical against what
-// ReadManaged returns. HTML escaping is disabled so the value round-trips
-// byte-stably (json.Compact does not escape, and the JSONC writer preserves the
-// literal string token). An empty URL yields "" (no value).
-func managedGalleryValue(url string) (string, error) {
-	if url == "" {
-		return "", nil
-	}
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(url); err != nil {
-		return "", fmt.Errorf("devicepolicy: encode gallery url: %w", err)
-	}
-	// Encode appends a newline; compact strips it (a JSON string has no other
-	// insignificant whitespace).
-	return compactJSON(buf.Bytes())
 }
 
 // rollbackWrite restores the settings key to its pre-cycle condition after the

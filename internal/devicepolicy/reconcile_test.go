@@ -108,7 +108,7 @@ func policyEP(hash string) EffectivePolicy {
 	return EffectivePolicy{
 		Category: CategoryIDEExtension,
 		Clear:    false,
-		Policy:   json.RawMessage(samplePolicyWire),
+		Policy:   map[string]json.RawMessage{allowedExtensionsSettingKey: json.RawMessage(samplePolicyWire)},
 		Hash:     hash,
 	}
 }
@@ -657,9 +657,9 @@ const (
 	galURLB = "https://other.example/api/v1"
 )
 
-// galleryRaw is the compacted JSON-string form of a URL as it lands in
-// settings.json and is recorded as owned (test URLs have no chars needing
-// escaping, so this equals managedGalleryValue's output).
+// galleryRaw is the JSON-string form of a URL as it rides in the settings map,
+// lands in settings.json, and is recorded as owned (test URLs have no chars
+// needing escaping, so compaction is a no-op).
 func galleryRaw(url string) string { return `"` + url + `"` }
 
 // fakeManagedWriter implements Writer AND managedSettingsWriter over an
@@ -766,7 +766,7 @@ func (w *fakeManagedWriter) Location() string { return "fake://managed-settings.
 
 func policyEPGallery(hash, url string) EffectivePolicy {
 	ep := policyEP(hash)
-	ep.GalleryServiceURL = url
+	ep.Policy[galleryServiceURLSettingKey] = json.RawMessage(galleryRaw(url))
 	return ep
 }
 
@@ -1160,5 +1160,62 @@ func TestEnforceManagedReadbackMismatchReportsPolicyNotApplied(t *testing.T) {
 		st.WrittenSettings[allowedExtensionsSettingKey] != samplePolicy ||
 		st.WrittenSettings[galleryServiceURLSettingKey] != galleryRaw(galURLA) {
 		t.Fatalf("ownership must record the intended values even on readback mismatch, got %+v ok=%v", st, ok)
+	}
+}
+
+func TestEnforceManagedRealWriterArbitraryThirdKey(t *testing.T) {
+	// End-to-end through the REAL settings.json writer (hujson), not a fake: a
+	// settings map with a novel third setting id — carrying a non-object,
+	// non-string value — must land verbatim on disk, be owned, and report
+	// compliant. Proves the whole reconcile→write→readback→ownership path is key-
+	// AND value-type-agnostic, so a future managed setting is free (no code change
+	// here).
+	withTempCache(t)
+	w, _ := newTestSettingsWriter(t)
+
+	const thirdKey = "extensions.autoCheckUpdates"
+	ep := EffectivePolicy{
+		Category: CategoryIDEExtension,
+		Hash:     "sha256:H",
+		Policy: map[string]json.RawMessage{
+			allowedExtensionsSettingKey: json.RawMessage(samplePolicyWire),
+			galleryServiceURLSettingKey: json.RawMessage(galleryRaw(galURLA)),
+			thirdKey:                    json.RawMessage("false"),
+		},
+	}
+	rep := &fakeReporter{}
+	r := &Reconciler{
+		Fetcher: &fakeFetcher{ep: ep}, Reporter: rep, Writer: w,
+		CustomerID: "c", DeviceID: "d", Platform: "linux",
+		Probe: func() (bool, string) { return false, "" },
+		Now:   func() time.Time { return time.Unix(0, 0).UTC() },
+	}
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if got := lastReport(t, rep); got.State != StateCompliant || got.AppliedHash != "sha256:H" {
+		t.Fatalf("report = %+v, want compliant + echoed hash", got)
+	}
+	// Re-read from the real file on disk (ReadManaged does a fresh os.ReadFile),
+	// proving each key landed as a top-level member with the exact bytes.
+	cur, err := w.ReadManaged([]string{allowedExtensionsSettingKey, galleryServiceURLSettingKey, thirdKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sv := cur[thirdKey]; !sv.Present || sv.Raw != "false" {
+		t.Fatalf("third key on disk = %+v, want present false", sv)
+	}
+	if sv := cur[allowedExtensionsSettingKey]; !sv.Present || sv.Raw != samplePolicy {
+		t.Fatalf("allowlist on disk = %+v, want %s", sv, samplePolicy)
+	}
+	if sv := cur[galleryServiceURLSettingKey]; !sv.Present || sv.Raw != galleryRaw(galURLA) {
+		t.Fatalf("gallery on disk = %+v, want %s", sv, galleryRaw(galURLA))
+	}
+	// Ownership recorded for every setting, the third included.
+	st, ok := ReadAppliedState(CategoryIDEExtension, TargetVSCode)
+	if !ok || st.WrittenSettings[thirdKey] != "false" ||
+		st.WrittenSettings[allowedExtensionsSettingKey] != samplePolicy ||
+		st.WrittenSettings[galleryServiceURLSettingKey] != galleryRaw(galURLA) {
+		t.Fatalf("ownership = %+v ok=%v, want all three keys owned", st, ok)
 	}
 }
