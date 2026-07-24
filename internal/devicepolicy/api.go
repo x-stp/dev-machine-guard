@@ -258,8 +258,10 @@ func isJSONObject(raw json.RawMessage) bool {
 // AppliedHash is empty and Observed instead carries the OS-managed policy the
 // agent read, keyed by VS Code setting id (the same keys as the desired policy)
 // so the backend can diff like-for-like and decide drift — the agent does not
-// judge match. EvaluatedEnforcement echoes the channel the cycle ran ("", "dmg"
-// or "mdm"). Observed and EvaluatedEnforcement are omitted when empty.
+// judge match. EvaluatedEnforcement names the canonical channel the cycle
+// actually ran — "dmg" or "mdm" (an empty or unrecognized request resolves to
+// "dmg") — so the backend can gate on an exact match. Observed is omitted when
+// empty.
 type ComplianceReport struct {
 	Category             string          `json:"category"`
 	Target               string          `json:"target"`

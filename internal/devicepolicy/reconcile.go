@@ -60,9 +60,10 @@ type Reconciler struct {
 	writeState func(category, target string, s AppliedTargetState) error
 	clearState func(category, target string) error
 
-	// enforcement is the normalized channel the current cycle ran (lower-cased,
-	// trimmed ep.Enforcement), stamped onto every report as EvaluatedEnforcement
-	// so it matches the backend's exact-match gate. Per-cycle scratch.
+	// enforcement is the canonical channel the current cycle actually ran —
+	// always "dmg" or "mdm" (an empty or unrecognized ep.Enforcement resolves to
+	// "dmg"). Stamped onto every report as EvaluatedEnforcement so it matches the
+	// backend's exact-match gate. Per-cycle scratch.
 	enforcement string
 }
 
@@ -151,19 +152,21 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 		// Malformed/transient: do nothing. The on-disk policy (if any) stands.
 		return fmt.Errorf("devicepolicy: fetch: %w", err)
 	}
-	// Normalize once for routing AND reporting: the backend gates on an exact
-	// "mdm"/"dmg", so EvaluatedEnforcement must carry the canonical value, not
-	// whatever casing/spacing arrived.
-	r.enforcement = strings.ToLower(strings.TrimSpace(ep.Enforcement))
-
-	// MDM is verify-only and owns nothing on disk, so it routes before the
-	// Writer/clear checks below.
-	switch r.enforcement {
+	// Resolve the requested channel to the canonical one this cycle actually
+	// runs, and stamp THAT on every report as EvaluatedEnforcement: the backend
+	// gates on an exact "mdm"/"dmg", so the report must name the channel that ran
+	// — never the raw request. An empty or unrecognized channel runs, and
+	// reports, the DMG path. MDM is verify-only and owns nothing on disk, so it
+	// routes before the Writer/clear checks below.
+	switch strings.ToLower(strings.TrimSpace(ep.Enforcement)) {
 	case enforcementMDM:
+		r.enforcement = enforcementMDM
 		return r.verifyMDM(ctx, cat, tgt, ep)
 	case enforcementDMG, "":
+		r.enforcement = enforcementDMG
 	default:
 		r.logf("devicepolicy: unknown enforcement %q; running DMG path", ep.Enforcement)
+		r.enforcement = enforcementDMG
 	}
 
 	if r.Writer == nil {
@@ -663,7 +666,10 @@ func opConverged(op settingOp, m map[string]settingValue) bool {
 // ownedKeys folds an ownership record into a flat map of setting id → the exact
 // value the agent last wrote, skipping empty entries. Every managed key — the
 // allowlist included — lives in WrittenSettings. Drift detection and
-// ownership-gated removal act only on keys the agent actually wrote.
+// ownership-gated removal act only on keys the agent actually wrote. The managed
+// path reads WrittenSettings only; a legacy single-key WrittenValue is NOT
+// migrated in (pre-GA — no shipped single-key VS Code state exists to carry over,
+// so there is nothing to be backward-compatible with).
 func ownedKeys(prev AppliedTargetState, hadPrev bool) map[string]string {
 	owned := map[string]string{}
 	if !hadPrev {

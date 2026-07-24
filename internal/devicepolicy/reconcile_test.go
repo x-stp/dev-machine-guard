@@ -1356,7 +1356,8 @@ func TestReconcileMDMClearIsNoOp(t *testing.T) {
 
 func TestReconcileUnknownEnforcementFallsToDMG(t *testing.T) {
 	// An unrecognized channel fails safe to the DMG write path (never skip
-	// enforcement) and still echoes the raw channel.
+	// enforcement) and reports the canonical channel it actually ran ("dmg"), not
+	// the raw request — the backend gates on an exact match.
 	w := &fakeWriter{}
 	ep := policyEP("sha256:H")
 	ep.Enforcement = "future-mode"
@@ -1371,8 +1372,8 @@ func TestReconcileUnknownEnforcementFallsToDMG(t *testing.T) {
 	if got.State != StateCompliant {
 		t.Fatalf("state = %q, want compliant", got.State)
 	}
-	if got.EvaluatedEnforcement != "future-mode" {
-		t.Fatalf("evaluated_enforcement = %q, want the echoed channel", got.EvaluatedEnforcement)
+	if got.EvaluatedEnforcement != enforcementDMG {
+		t.Fatalf("evaluated_enforcement = %q, want canonical %q", got.EvaluatedEnforcement, enforcementDMG)
 	}
 }
 

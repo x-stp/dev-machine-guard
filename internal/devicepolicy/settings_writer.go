@@ -380,6 +380,23 @@ func (w *settingsWriter) ReadManaged(keys []string) (map[string]settingValue, er
 	return out, nil
 }
 
+// jsonPointerPath returns key as a ready-to-splice RFC 6902 patch path: the
+// single-segment JSON Pointer "/"+token, the token RFC 6901-escaped ('~'→'~0',
+// '/'→'~1'), the whole thing JSON-string-encoded (quotes included). VS Code
+// setting ids are dotted (extensions.allowed), so this is normally just quoting
+// — but the managed key set is backend-driven, and escaping + encoding stop an
+// unusual key (one holding '/', '~', '"', '\\', or a control char) from forging
+// a nested pointer path or corrupting the patch document.
+func jsonPointerPath(key string) (string, error) {
+	token := strings.ReplaceAll(key, "~", "~0")
+	token = strings.ReplaceAll(token, "/", "~1")
+	b, err := json.Marshal("/" + token)
+	if err != nil {
+		return "", fmt.Errorf("devicepolicy: encode patch path for %q: %w", key, err)
+	}
+	return string(b), nil
+}
+
 // ApplyManaged builds one RFC-6902 patch from ops — Set → add (upsert), Remove
 // → remove (pre-checked so an absent key is skipped, not an error), preserve →
 // nothing — and applies it in a single atomic load→patch→store. An empty patch
@@ -402,9 +419,14 @@ func (w *settingsWriter) ApplyManaged(ops []settingOp) (map[string]settingValue,
 			if !json.Valid(op.Value) {
 				return nil, fmt.Errorf("devicepolicy: refusing to write invalid JSON value for %q to %s", op.Key, w.path)
 			}
-			// op.Key is a dotted setting id with no '/' or '~', so it needs no
-			// JSON-Pointer escaping; the dot is literal.
-			patchOps = append(patchOps, `{"op":"add","path":"/`+op.Key+`","value":`+string(op.Value)+`}`)
+			path, perr := jsonPointerPath(op.Key)
+			if perr != nil {
+				return nil, perr
+			}
+			// Value is spliced verbatim (already json.Valid-checked) — never
+			// re-encoded, which would reorder members or HTML-escape it and break
+			// the backend's byte-exact applied==desired check.
+			patchOps = append(patchOps, `{"op":"add","path":`+path+`,"value":`+string(op.Value)+`}`)
 		case op.Remove:
 			// RFC 6902 "remove" errors on an absent member; pre-check presence so
 			// a Remove of a key that is not there is simply skipped.
@@ -413,7 +435,11 @@ func (w *settingsWriter) ApplyManaged(ops []settingOp) (map[string]settingValue,
 				return nil, perr
 			}
 			if present {
-				patchOps = append(patchOps, `{"op":"remove","path":"/`+op.Key+`"}`)
+				path, perr := jsonPointerPath(op.Key)
+				if perr != nil {
+					return nil, perr
+				}
+				patchOps = append(patchOps, `{"op":"remove","path":`+path+`}`)
 			}
 		}
 	}

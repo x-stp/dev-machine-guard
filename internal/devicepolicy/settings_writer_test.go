@@ -600,6 +600,30 @@ func TestApplyManagedRejectsInvalidJSONValue(t *testing.T) {
 	}
 }
 
+func TestApplyManagedEscapesUnusualKeys(t *testing.T) {
+	// The managed key set is backend-driven. A key holding JSON-Pointer
+	// metacharacters ('/', '~') or JSON-string metacharacters ('"', '\') must be
+	// written as ONE literal top-level member — never a nested pointer path, and
+	// never a corrupt patch document that clobbers the file.
+	for _, key := range []string{`weird/key`, `tilde~key`, `quote"key`, `back\slash`} {
+		w, path := newTestSettingsWriter(t)
+		writeSettingsFixture(t, path, `{"keep.me": 1}`)
+		if _, err := w.ApplyManaged([]settingOp{{Key: key, Set: true, Value: json.RawMessage(`"v"`)}}); err != nil {
+			t.Fatalf("ApplyManaged(%q): %v", key, err)
+		}
+		var m map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(readFileString(t, path)), &m); err != nil {
+			t.Fatalf("file not valid JSON after writing key %q: %v", key, err)
+		}
+		if string(m["keep.me"]) != "1" {
+			t.Fatalf("untouched key lost after writing %q: %v", key, m)
+		}
+		if got, ok := m[key]; !ok || string(got) != `"v"` {
+			t.Fatalf("key %q must be one literal top-level member = \"v\", got ok=%v val=%s", key, ok, got)
+		}
+	}
+}
+
 // TestGalleryValueRoundTrips pins the ownership invariant on the value path the
 // reconciler now uses: the gallery URL arrives as a JSON string in the settings
 // map, is compacted (compactSettings), written, and recorded as owned — and that
